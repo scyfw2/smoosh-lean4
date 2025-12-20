@@ -1,5 +1,5 @@
 # start with a reasonable image. Debian 9 stretch is what's on the POSIX testing VM
-FROM ocaml/opam2:debian-9
+FROM ocaml/opam:debian-11-ocaml-4.14
 
 # silence apt
 # TODO this still isn't silencing it :(
@@ -10,12 +10,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN sudo apt-get update
 
 # other shells we'll want
-RUN sudo apt-get install -y dash=0.5.8-2.4
-RUN sudo apt-get install -y --no-install-recommends bash=4.4-5
-RUN sudo apt-get install -y yash=2.43-1
-RUN sudo apt-get install -y zsh=5.3.1-4+deb9u5 && echo 'emulate sh' >~/.zshrc
-RUN sudo apt-get install -y ksh=93u+20120801-3.1
-RUN sudo apt-get install -y mksh=54-2+b4
+RUN sudo apt-get install -y dash
+RUN sudo apt-get install -y --no-install-recommends bash
+RUN sudo apt-get install -y yash
+RUN sudo apt-get install -y zsh && echo 'emulate sh' >~/.zshrc
+RUN sudo apt-get install -y ksh
+RUN sudo apt-get install -y mksh
 
 # for OSH
 RUN sudo apt-get install -y python2.7 python python-dev time libreadline-dev
@@ -30,7 +30,7 @@ RUN sudo apt-get install -y --no-install-recommends expect
 RUN sudo apt-get install -y gawk
 
 # camlp4 won't work in 4.08 right now 2019-06-18
-RUN opam switch 4.07
+RUN opam switch 4.14
 
 # make sure we have ocamlfind and ocamlbuild
 RUN opam install ocamlfind ocamlbuild
@@ -39,7 +39,7 @@ RUN opam install ocamlfind ocamlbuild
 RUN opam pin add ctypes 0.11.5
 RUN opam install ctypes-foreign
 RUN opam install num
-RUN opam install extunix
+RUN opam install extunix.0.3.2
 
 ################################################################################
 # okay, we've downloaded and installed everything.

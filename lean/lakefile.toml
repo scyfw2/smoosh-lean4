@@ -1,0 +1,15 @@
+name = "Smoosh"
+version = "0.1.0"
+defaultTargets = ["smoosh"]
+
+[[lean_lib]]
+name = "Smoosh"
+
+[[lean_exe]]
+name = "smoosh"
+root = "Main"
+
+[[require]]
+name = "std"
+git = "https://github.com/leanprover/std4"
+rev = "v4.26.0"

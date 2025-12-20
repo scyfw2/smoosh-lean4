@@ -9,3 +9,9 @@ posix
 ocamlprof.dump
 \#*
 .vagrant/
+lean/.lake
+lean/lake-packages/
+lean/build/
+lean/.lake/
+lean/lake-packages/
+lean/build/
