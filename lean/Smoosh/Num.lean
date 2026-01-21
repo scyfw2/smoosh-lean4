@@ -148,7 +148,7 @@ def int32Min : Int32 := -((NatConv.ofNat 2) ^ 31)
   --------------------------------
 -/
 -- val unbounded_unsigned : nat (* bits *) -> integer -> integer
-def unboundedUnsigned (bits : Nat) (unboundedN : Int) : Int :=
+def unbounded_unsigned (bits : Nat) (unboundedN : Int) : Int :=
   let signedBits := bits - 1
   let upper : Int := (2 : Int) ^ signedBits - 1
   let lower : Int := -((2 : Int) ^ signedBits)
@@ -159,8 +159,8 @@ def unboundedUnsigned (bits : Nat) (unboundedN : Int) : Int :=
   if n < 0 then (2 : Int) ^ bits + n else n
 
 -- val unbounded_unsigned64 : integer -> integer
-def unboundedUnsigned64 (n : Int) : Int :=
-  unboundedUnsigned 64 n
+def unbounded_unsigned64 (n : Int) : Int :=
+  unbounded_unsigned 64 n
 
 def splitWhile {α} (p : α → Bool) : List α → List α × List α
   | []      => ([], [])
@@ -177,7 +177,7 @@ def splitWhile {α} (p : α → Bool) : List α → List α × List α
   --------------------------------
 -/
 -- val readInteger_loop : nat -> integer -> (list char) -> either string integer
-def readIntegerLoop (base : Nat) (acc : Int) : List Char → Except String Int
+def readInteger_loop (base : Nat) (acc : Int) : List Char → Except String Int
   | []      => .ok acc
   | c :: cs =>
     match hexalphaToNum c with
@@ -186,13 +186,13 @@ def readIntegerLoop (base : Nat) (acc : Int) : List Char → Except String Int
       if num > base - 1 then
         .error s!"{c} is not a valid base {base} digit"
       else
-        readIntegerLoop base ((Int.ofNat base) * acc + (Int.ofNat num)) cs
+        readInteger_loop base ((Int.ofNat base) * acc + (Int.ofNat num)) cs
 
 -- val readUnsignedInteger : nat -> list char -> either string integer
 def readUnsignedInteger (base : Nat) (chars : List Char) : Except String Int :=
   match chars with
   | [] => .error "empty string is not numeric"
-  | _  => readIntegerLoop base 0 chars
+  | _  => readInteger_loop base 0 chars
 
 -- val readSignedInteger : nat -> list char -> either string integer
 def readSignedInteger (base : Nat) (chars : List Char) : Except String Int :=
@@ -234,7 +234,7 @@ def readNat (cs : List Char) : Except String Nat :=
     .error s!"{String.ofList cs} is non-numeric"
 
 -- val parse_nat : list char -> either string (nat * list char)
-def parseNat (cs : List Char) : Except String (Nat × List Char) :=
+def parse_nat (cs : List Char) : Except String (Nat × List Char) :=
   let (ds, rest) := splitWhile isDigit cs
   if ds.isEmpty then
     .error "no digits"
@@ -292,12 +292,10 @@ def readInt32 (base : Nat) (chars : List Char) : Except String Int32 :=
   | _  => readInt32_loop base (NatConv.ofNat (α := Int32) 0) chars
 
 /-
-  --------------------------------
   Writing (base 2/8/10/16) for Int
-  --------------------------------
 -/
-private def validBaseNat (b : Nat) : Bool :=
-  (b == 2) || (b == 8) || (b == 10) || (b == 16)
+-- private def validBaseNat (b : Nat) : Bool :=
+--   (b == 2) || (b == 8) || (b == 10) || (b == 16)
 
 -- Lem: digits = toCharList "0123456789abcdef"
 private def digits : List Char := "0123456789abcdef".toList
@@ -309,58 +307,86 @@ private def listGet? {α : Type u} : List α → Nat → Option α
   | _ :: xs, n + 1 => listGet? xs n
 
 -- val conv_digit : nat -> string
-def conv_digit (n : Nat) : String :=
+def conv_digit (n : Nat) : Except String String :=
   match listGet? digits n with
-  | none   => panic! "invalid digit---can only go up to hexadecimal"
-  | some c => String.ofList [c]
+  | none   => .error "invalid digit---can only go up to hexadecimal"
+  | some c => .ok (String.ofList [c])
+
+/-- Nat-level helper: total, with a proof that the base is > 1. -/
+def writeHelperNat (b : Nat) (hb : 1 < b) (str : String) (n : Nat) : Except String String :=
+  if _h : n = 0 then
+    .ok str
+  else
+    match conv_digit (n % b) with
+    | .error e => .error e
+    | .ok d    => writeHelperNat b hb (d ++ str) (n / b)
+termination_by n
+decreasing_by
+  exact Nat.div_lt_self (Nat.pos_of_ne_zero _h) hb
 
 -- val write_helper : forall 'a. Eq 'a, Nat 'a, NumIntegerDivision 'a, NumRemainder 'a => 'a -> string -> 'a -> string
-partial def write_helper (α : Type u)
+-- partial def write_helper (α : Type u)
+--     [DecidableEq α] [NatConv α] [HDiv α α α] [HMod α α α]
+--     (base : α) (str : String) (n : α) : Except String String :=
+--   let b := NatConv.toNat base
+--   if !(validBaseNat b) then
+--     .error "can only work with binary, octal, decimal, and hexadecimal"
+--   else
+--     if n = NatConv.ofNat 0 then
+--       .ok str
+--     else
+--       let next_digit : α := n % base
+--       match conv_digit (NatConv.toNat next_digit) with
+--       | .error e => .error e
+--       | .ok d => write_helper α base (d ++ str) (n / base)
+/-- Nat-level helper: total, with a proof that the base is > 1. -/
+def write_helper (α : Type u)
     [DecidableEq α] [NatConv α] [HDiv α α α] [HMod α α α]
-    (base : α) (str : String) (n : α) : String :=
+    (base : α) (str : String) (n : α) : Except String String :=
   let b := NatConv.toNat base
-  if !(validBaseNat b) then
-    panic! "can only work with binary, octal, decimal, and hexadecimal"
-  else
-    if n = NatConv.ofNat 0 then
-      str
-    else
-      let next_digit : α := n % base
-      write_helper α base (conv_digit (NatConv.toNat next_digit) ++ str) (n / base)
+  let nn := NatConv.toNat n
+  match b with
+  | 2  => writeHelperNat 2  (by decide) str nn
+  | 8  => writeHelperNat 8  (by decide) str nn
+  | 10 => writeHelperNat 10 (by decide) str nn
+  | 16 => writeHelperNat 16 (by decide) str nn
+  | _  => .error "can only work with binary, octal, decimal, and hexadecimal"
 
 -- val unbounded_write_base : forall 'a. Eq 'a, Ord 'a, Nat 'a, NumNegate 'a, NumIntegerDivision 'a, NumRemainder 'a => 'a (* base *) -> 'a (* num *) -> string
 def unbounded_write_base (α : Type u)
     [DecidableEq α] [LT α] [DecidableRel (fun a b : α => a < b)]
     [NatConv α] [Neg α] [HDiv α α α] [HMod α α α]
-    (base : α) (n : α) : String :=
+    (base : α) (n : α) : Except String String :=
   if n < NatConv.ofNat 0 then
-    "-" ++ write_helper α base "" (-n)
+    match write_helper α base "" (-n) with
+    | .error e => .error e
+    | .ok s    => .ok ("-" ++ s)
   else if n = NatConv.ofNat 0 then
-    "0"
+    .ok "0"
   else
     write_helper α base "" n
 
 abbrev unbounded_write := unbounded_write_base
 
 -- val unbounded_write_decimal : forall 'a. Eq 'a, Ord 'a, Nat 'a, NumNegate 'a, NumIntegerDivision 'a, NumRemainder 'a => 'a -> string
-def unbounded_write_decimal (α : Type u)
+def unbounded_write_decimal {α : Type u}
     [DecidableEq α] [LT α] [DecidableRel (fun a b : α => a < b)]
     [NatConv α] [Neg α] [HDiv α α α] [HMod α α α]
-    (n : α) : String :=
+    (n : α) : Except String String :=
   unbounded_write α (NatConv.ofNat 10) n
 
 -- val unbounded_write_octal : forall 'a. Eq 'a, Ord 'a, Nat 'a, NumNegate 'a, NumIntegerDivision 'a, NumRemainder 'a => 'a -> string
-def unbounded_write_octal (α : Type u)
+def unbounded_write_octal {α : Type u}
     [DecidableEq α]  [LT α] [DecidableRel (fun a b : α => a < b)]
     [NatConv α] [Neg α] [HDiv α α α] [HMod α α α]
-    (n : α) : String :=
+    (n : α) : Except String String :=
   unbounded_write α (NatConv.ofNat 8) n
 
 -- val unbounded_write_hex : forall 'a. Eq 'a, Ord 'a, Nat 'a, NumNegate 'a, NumIntegerDivision 'a, NumRemainder 'a => 'a -> string
-def unbounded_write_hex (α : Type u)
+def unbounded_write_hex {α : Type u}
     [DecidableEq α] [LT α] [DecidableRel (fun a b : α => a < b)]
     [NatConv α] [Neg α] [HDiv α α α] [HMod α α α]
-    (n : α) : String :=
+    (n : α) : Except String String :=
   unbounded_write α (NatConv.ofNat 16) n
 
 
@@ -373,7 +399,10 @@ def unbounded_read (cs : List Char) : Except String Int :=
 
 instance : Read Int where
   read  := unbounded_read
-  write := fun (n : Int) => unbounded_write_decimal Int n
+  write := fun (n : Int) =>
+    match unbounded_write_decimal (α := Int) n with
+    | .ok s    => s
+    | .error e => panic! e
 
 instance : Read Int64 where
   read  := fun cs => readConstant64 (readInt64 10) (readInt64 16) (readInt64 8) cs
