@@ -16,8 +16,11 @@ inductive QuotingMode where | quoted | unquoted
 
 /-! # Trap management -/
 
+class Shell (α : Type) [OS α] where
+  runCommand : OsState α → CommandOpts → CheckingMode → SymbolicString → List SymbolicString → Env → List (Fd × Sum Fd Unit) → EvaluationStep × OsState α × Stmt
+
 section Semantics
-variable {α : Type} [OS α]
+variable {α : Type} [OS α] [Shell α]
 
 /-- Check if a command name is a POSIX special builtin -/
 private def isSpecialBuiltinName (name : String) : Bool :=
@@ -153,7 +156,7 @@ instance : Nonempty (ExpCtrlResult α) := ⟨Sum.inl (.esStep "", sorry, [])⟩
 mutual
 
 /-- Expand a control node — translated from expand_control (semantics.lem:203-467) -/
-partial def expandControl (s0 : OsState α) (split : SplittingMode) (q : QuotingMode) (k : Control)
+partial def expandControl (stepFun : StepFun α) (s0 : OsState α) (split : SplittingMode) (q : QuotingMode) (k : Control)
     : ExpCtrlResult α :=
   match k with
   | .tilde pfx =>
@@ -174,45 +177,45 @@ partial def expandControl (s0 : OsState α) (split : SplittingMode) (q : Quoting
       match f with
       | .default_ _ => buildAt paramVars
       | .ndefault w =>
-        if paramVars.isEmpty then expandWords s0 split q .generatedString [] w
+        if paramVars.isEmpty then expandWords stepFun s0 split q .generatedString [] w
         else buildAt paramVars
       | .assign _ => buildAt paramVars
       | .nassign _ =>
         if paramVars.isEmpty
-        then expandWords s0 split q .generatedString [] [.k (.lerror "@" [.expS "bad variable name"] [])]
+        then expandWords stepFun s0 split q .generatedString [] [.k (.lerror "@" [.expS "bad variable name"] [])]
         else buildAt paramVars
       | .error _ => buildAt paramVars
       | .nerror w =>
         if paramVars.isEmpty
-        then expandWords s0 split q .generatedString [] [.k (.lerror "@" [] w)]
+        then expandWords stepFun s0 split q .generatedString [] [.k (.lerror "@" [] w)]
         else buildAt paramVars
-      | .length_ => expandWords s0 split q .generatedString [] [.k (.param "*" .length_)]
-      | .alt w => expandWords s0 split q .generatedString [] w
+      | .length_ => expandWords stepFun s0 split q .generatedString [] [.k (.param "*" .length_)]
+      | .alt w => expandWords stepFun s0 split q .generatedString [] w
       | .nalt w =>
         if paramVars.isEmpty then buildAt paramVars
-        else expandWords s0 split q .generatedString [] w
+        else expandWords stepFun s0 split q .generatedString [] w
       | .substring .prefix_ mode w =>
         match paramVars with
         | v1 :: vars =>
           let v1' := Entry.k (.quote [] [.k (.lmatch [v1] .prefix_ mode [] w)])
-          expandWords s0 split q .generatedString [] (v1' :: wordsOfFields vars)
+          expandWords stepFun s0 split q .generatedString [] (v1' :: wordsOfFields vars)
         | _ => buildAt []
       | .substring .suffix_ mode w =>
         match destInit paramVars with
         | some (vars', vn) =>
           let vn' := Entry.k (.quote [] [.k (.lmatch [vn] .suffix_ mode [] w)])
-          expandWords s0 split q .generatedString [] (wordsOfFields vars' ++ [vn'])
+          expandWords stepFun s0 split q .generatedString [] (wordsOfFields vars' ++ [vn'])
         | none => buildAt []
       | _ => buildAt paramVars
     else
       let (s1, ew, w) := expandParam s0 split q str f
-      expandWords s1 split q .generatedString ew w
+      expandWords stepFun s1 split q .generatedString ew w
   | .lassign str f [] =>
     match setParam str (concatExpanded f) s0 with
     | .inl err => Sum.inl (.esParam "bad or readonly variable", s0, .expS err :: f)
     | .inr s1 => Sum.inr (.esParam "finished assignment", s1, f, [])
   | .lassign str f w =>
-    match expandWords s0 .noSplit q .generatedString [] w with
+    match expandWords stepFun s0 .noSplit q .generatedString [] w with
     | Sum.inr (step, s1, f1, w1) =>
       Sum.inr (.esNested (.esParam "assignment") step, s1, [], [.k (.lassign str (f ++ f1) w1)])
     | Sum.inl err => Sum.inl err
@@ -223,43 +226,86 @@ partial def expandControl (s0 : OsState α) (split : SplittingMode) (q : Quoting
     let matched := tryMatchSubstring s1.sh.locale side mode (symbolicStringOfString pat) symstr
     Sum.inr (.esParam "finished match", s1, [], wordsOfSymbolicString matched)
   | .lmatch str side mode f w =>
-    match expandWords s0 .noSplit .unquoted .generatedString [] w with
+    match expandWords stepFun s0 .noSplit .unquoted .generatedString [] w with
     | Sum.inr (step, s1, f1, w1) =>
       Sum.inr (.esNested (.esParam "match") step, s1, [], [.k (.lmatch str side mode (f ++ f1) w1)])
     | Sum.inl err => Sum.inl err
   | .lerror str f [] =>
     Sum.inl (.esParam "raising requested error", s0, .expS (str ++ ": ") :: f)
   | .lerror str f w =>
-    match expandWords s0 .noSplit q .generatedString [] w with
+    match expandWords stepFun s0 .noSplit q .generatedString [] w with
     | Sum.inr (step, s1, f1, w1) =>
       Sum.inr (.esNested (.esParam "error") step, s1, [], [.k (.lerror str (f ++ f1) w1)])
     | Sum.inl err => Sum.inl err
-  | .backtick _c =>
-    -- TODO: Command substitution (needs readAllFd, closeFd — not yet implemented)
-    Sum.inl (.esCommand "backtick not yet implemented", s0, [])
-  | .lbacktick _corig _pid _fdRead =>
-    -- TODO: Command substitution reading (needs readAllFd)
-    Sum.inl (.esCommand "lbacktick not yet implemented", s0, [])
-  | .lbacktickWait _corig _pid s_out =>
-    -- TODO: Command substitution waiting (needs waitForPid with stepEval)
-    Sum.inr (.esCommand "command process terminated", s0, [.expS s_out], [])
+  | .backtick c =>
+    -- Command substitution: create a pipe, fork subshell with stdout → pipe
+    match OS.osPipe s0 with
+    | .inl err =>
+      Sum.inl (.esCommand s!"failed to set up pipe: {err}", s0, [])
+    | .inr (s1, fdRead, fdWrite) =>
+      let redirs : List ExpandedRedir := [.erDup .toFD .closeOrig STDOUT (some fdWrite),
+                                           .erDup .toFD .closeOrig fdRead none]
+      match doRedirs s1 redirs with
+      | (s2, .inl _) =>
+        Sum.inl (.esCommand "failed to set up subshell", s2, [])
+      | (s2, .inr savedFds) =>
+        let (s3, pid) := OS.osForkAndSubshell s2 c .fg none false
+        let s4 := restoreFds s3 savedFds
+        let s5 := closeFd s4 fdWrite
+        Sum.inr (.esCommand "initializing subshell", s5, [],
+                 [.k (.lbacktick c pid fdRead)])
+  | .lbacktick corig pid fdRead =>
+    match OS.osReadAllFd stepFun s0 fdRead with
+    | (s1, .inl step) =>
+      Sum.inr (.esEval (.esCommand s!"process with pid {pid} stepped") step,
+               s1, [], [.k (.lbacktick corig pid fdRead)])
+    | (s1, .inr none) =>
+      Sum.inl (.esCommand "broken pipe", s1, [])
+    | (s1, .inr (some str)) =>
+      let s2 := closeFd s1 fdRead
+      let sTrimmed := trimrNewlines str
+      Sum.inr (.esCommand "command exited successfully, waiting",
+               s2, [], [.k (.lbacktickWait corig pid sTrimmed)])
+  | .lbacktickWait _corig pid sOut =>
+    match waitForPid stepFun s0 pid with
+    | (s1, none) =>
+      Sum.inr (.esCommand "command process vanished", s1, [.expS sOut], [])
+    | (s1, some (.inl step)) =>
+      Sum.inr (.esEval (.esCommand "command process stepped") step,
+               s1, [], [.k (.lbacktickWait _corig pid sOut)])
+    | (s1, some (.inr code)) =>
+      Sum.inr (.esCommand "command process terminated",
+               exitWith code s1, [.expS sOut], [])
   | .arith f [] =>
     -- Simplified arithmetic: parse and evaluate
     let arithStr := String.join (f.filterMap (fun ew => match ew with | .expS s => some s | .usrS s => some s | _ => none))
     match parseArith arithStr with
     | .error e => Sum.inl (.esArith ("arithmetic error: " ++ e), s0, [.expS "0"])
-    | .ok _e =>
-      -- TODO: full arith64 evaluation
-      Sum.inr (.esArith "computed arithmetic result", s0, [.expS "0"], [])
+    | .ok e =>
+      let get (st : OsState α) (n : String) : Int :=
+        match lookupStringParam st n with
+        | none => 0
+        | some ss =>
+          match tryConcrete ss with
+          | some s => match String.toInt? s with | some i => i | none => 0
+          | none => 0
+      let set (st : OsState α) (n : String) (v : Int) : Except String (OsState α) :=
+        match setParam n (symbolicStringOfString (toString v)) st with
+        | .inl err => .error err
+        | .inr st' => Except.ok st'
+
+      match evalArith get set e s0 with
+      | Except.ok (res, s1) => Sum.inr (.esArith "computed arithmetic result", s1, [.expS (toString res)], [])
+      | Except.error msg => Sum.inl (.esArith ("arithmetic evaluation error: " ++ msg), s0, [.expS "0"])
   | .arith f w =>
-    match expandWords s0 split q .generatedString [] w with
+    match expandWords stepFun s0 split q .generatedString [] w with
     | Sum.inr (step, s1, f1, w1) =>
       Sum.inr (.esNested (.esArith "before arithmetic parsing") step, s1, [], [.k (.arith (f ++ f1) w1)])
     | Sum.inl err => Sum.inl err
   | .quote f [] =>
     Sum.inr (.esQuote "finished quote expansion", s0, collapseQuoted f, [])
   | .quote f w =>
-    match expandWords s0 split .quoted .generatedString [] w with
+    match expandWords stepFun s0 split .quoted .generatedString [] w with
     | Sum.inr (step, s1, [], w1) =>
       Sum.inr (step, s1, [], [.k (.quote (f ++ [.dquo []]) w1)])
     | Sum.inr (step, s1, f1, w1) =>
@@ -269,11 +315,11 @@ partial def expandControl (s0 : OsState α) (split : SplittingMode) (q : Quoting
     Sum.inr (.esEscape "", s0, [.dquo [.c c]], [])
 
 /-- Expand a word list — translated from expand_words (semantics.lem:469-487) -/
-partial def expandWords (s0 : OsState α) (split : SplittingMode) (q : QuotingMode) (sm : StringMode)
+partial def expandWords (stepFun : StepFun α) (s0 : OsState α) (split : SplittingMode) (q : QuotingMode) (sm : StringMode)
     (f : ExpandedWords) : Words → ExpCtrlResult α
   | [] => Sum.inr (.esStep "done", s0, f, [])
   | .f :: ws => Sum.inr (.esStep "user field separator", s0, f ++ [.usrF], ws)
-  | .s "" :: ws => expandWords s0 split q sm f ws
+  | .s "" :: ws => expandWords stepFun s0 split q sm f ws
   | .s str :: ws =>
     let f1 := match q, sm with
       | .quoted, _ => [ExpandedWord.dquo (symbolicStringOfString str)]
@@ -281,7 +327,7 @@ partial def expandWords (s0 : OsState α) (split : SplittingMode) (q : QuotingMo
       | .unquoted, .generatedString => [.expS str]
     Sum.inr (.esStep "plain string", s0, f ++ f1, ws)
   | .k k :: ws =>
-    match expandControl s0 split q k with
+    match expandControl stepFun s0 split q k with
     | Sum.inr (step, s1, f1, w1) => Sum.inr (step, s1, f ++ f1, w1 ++ ws)
     | Sum.inl err => Sum.inl err
   | .esym sym :: ws =>
@@ -290,10 +336,10 @@ partial def expandWords (s0 : OsState α) (split : SplittingMode) (q : QuotingMo
 end
 
 /-- Step expansion state machine — translated from step_expansion (semantics.lem:515-541) -/
-def stepExpansion (s : OsState α) : ExpansionState →
+def stepExpansion (stepFun : StepFun α) (s : OsState α) : ExpansionState →
     ExpansionStep × OsState α × ExpansionState
   | .expStart opts w =>
-    match expandWords s opts.splitting .unquoted .userString [] w with
+    match expandWords stepFun s opts.splitting .unquoted .userString [] w with
     | Sum.inr (step, s1, f1, w1) => (step, s1, .expExpand opts f1 w1)
     | Sum.inl (step, s1, f1) => (step, s1, .expError (fieldsOfExpandedWords f1))
   | .expExpand opts f0 [] =>
@@ -301,7 +347,7 @@ def stepExpansion (s : OsState α) : ExpansionState →
     then (.esSplit "starting field splitting", s, .expSplit opts f0)
     else (.esSplit "skipping field splitting", s, .expPath opts (skipFieldSplitting f0))
   | .expExpand opts f0 w0 =>
-    match expandWords s opts.splitting .unquoted .userString f0 w0 with
+    match expandWords stepFun s opts.splitting .unquoted .userString f0 w0 with
     | Sum.inr (step, s1, f1, w1) => (step, s1, .expExpand opts f1 w1)
     | Sum.inl (step, s1, f1) => (step, s1, .expError (fieldsOfExpandedWords f1))
   | .expSplit opts f0 =>
@@ -326,9 +372,9 @@ inductive RedirExpResult (α : Type) where
   | redirExpDone (os : α) (er : ExpandedRedir)
   | redirExpError (msg : String)
 
-def stepRedir (s : OsState α) : ExpandingRedir → RedirExpResult (OsState α)
+def stepRedir (stepFun : StepFun α) (s : OsState α) : ExpandingRedir → RedirExpResult (OsState α)
   | .xrFile ty fd es =>
-    let (step, s', es') := stepExpansion s es
+    let (step, s', es') := stepExpansion stepFun s es
     match es' with
     | .expDone fs =>
       match fs with
@@ -336,7 +382,7 @@ def stepRedir (s : OsState α) : ExpandingRedir → RedirExpResult (OsState α)
       | _ => .redirExpError "ambiguous redirect"
     | _ => .redirExpStep step s' (.xrFile ty fd es')
   | .xrDup ty fd es =>
-    let (step, s', es') := stepExpansion s es
+    let (step, s', es') := stepExpansion stepFun s es
     match es' with
     | .expDone fs =>
       match fs with
@@ -351,7 +397,7 @@ def stepRedir (s : OsState α) : ExpandingRedir → RedirExpResult (OsState α)
       | _ => .redirExpError "ambiguous redirect"
     | _ => .redirExpStep step s' (.xrDup ty fd es')
   | .xrHeredoc ty fd es =>
-    let (step, s', es') := stepExpansion s es
+    let (step, s', es') := stepExpansion stepFun s es
     match es' with
     | .expDone fs =>
       let ss := fs.flatMap id
@@ -376,7 +422,7 @@ partial def stepEval (s : OsState α) (c : Stmt)
 
   -- Expanding args
   | .commandExpArgs assigns es redirs opts =>
-    let (step, s', es') := stepExpansion s es
+    let (step, s', es') := stepExpansion (stepEval' s) s es
     match es' with
     | .expDone fs =>
       let rs := ([], none, redirs)
@@ -388,11 +434,15 @@ partial def stepEval (s : OsState α) (c : Stmt)
   | .commandExpRedirs assigns fs (ers, mxr, []) opts =>
     match mxr with
     | none =>
-      -- All redirects expanded
-      (.xsSimple "command-ready", s,
-       .commandExpAssign (assigns.map (fun (k, w) => (k, .expStart { splitting := .noSplit, globbing := false } w))) fs (match (doRedirs s ers).2 with | .inr sf => sf | .inl _ => []) opts)
+      -- All redirects expanded — push local scope for assignments
+      let (s1, savedFds) := match (doRedirs s ers) with
+        | (s', .inr sf) => (s', sf)
+        | (s', .inl _) => (s', [])
+      let s2 := newLocalScope s1
+      (.xsSimple "command-ready", s2,
+       .commandExpAssign (assigns.map (fun (k, w) => (k, .expStart { splitting := .noSplit, globbing := false } w))) fs savedFds opts)
     | some xr =>
-      match stepRedir s xr with
+      match stepRedir (stepEval' s) s xr with
       | .redirExpDone s' er =>
         (.xsRedir "expanding", s', .commandExpRedirs assigns fs (ers ++ [er], none, []) opts)
       | .redirExpStep step s' xr' =>
@@ -410,9 +460,19 @@ partial def stepEval (s : OsState α) (c : Stmt)
   | .semi s1 s2 =>
     match s1 with
     | .done => (.xsSemi "next", s, s2)
+    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
+    | .return_ => (.xsSimple "propagate-return", s, .return_)
+    | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
+    | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
       let (step, s', c') := stepEval s s1
-      (.xsSemi "left", s', .semi c' s2)
+      match c' with
+      | .done => (.xsNested (.xsSemi "done LHS") step, s', s2)
+      | .exit_ => (.xsNested (.xsSemi "propagate-exit") step, s', .exit_)
+      | .return_ => (.xsNested (.xsSemi "propagate-return") step, s', .return_)
+      | .break_ n => (.xsNested (.xsSemi "propagate-break") step, s', .break_ n)
+      | .continue_ n => (.xsNested (.xsSemi "propagate-continue") step, s', .continue_ n)
+      | _ => (.xsNested (.xsSemi "left") step, s', .semi c' s2)
 
   -- And
   | .and_ s1 s2 =>
@@ -420,9 +480,21 @@ partial def stepEval (s : OsState α) (c : Stmt)
     | .done =>
       if s.sh.exitCode == 0 then (.xsAnd "success-continue", s, s2)
       else (.xsAnd "fail-skip", s, .done)
+    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
+    | .return_ => (.xsSimple "propagate-return", s, .return_)
+    | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
+    | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
       let (step, s', c') := stepEval s s1
-      (.xsAnd "left", s', .and_ c' s2)
+      match c' with
+      | .done =>
+        if s'.sh.exitCode == 0 then (.xsNested (.xsAnd "success-continue") step, s', s2)
+        else (.xsNested (.xsAnd "fail-skip") step, s', .done)
+      | .exit_ => (.xsNested (.xsAnd "propagate-exit") step, s', .exit_)
+      | .return_ => (.xsNested (.xsAnd "propagate-return") step, s', .return_)
+      | .break_ n => (.xsNested (.xsAnd "propagate-break") step, s', .break_ n)
+      | .continue_ n => (.xsNested (.xsAnd "propagate-continue") step, s', .continue_ n)
+      | _ => (.xsNested (.xsAnd "left") step, s', .and_ c' s2)
 
   -- Or
   | .or_ s1 s2 =>
@@ -430,9 +502,21 @@ partial def stepEval (s : OsState α) (c : Stmt)
     | .done =>
       if s.sh.exitCode != 0 then (.xsOr "fail-continue", s, s2)
       else (.xsOr "success-skip", s, .done)
+    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
+    | .return_ => (.xsSimple "propagate-return", s, .return_)
+    | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
+    | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
       let (step, s', c') := stepEval s s1
-      (.xsOr "left", s', .or_ c' s2)
+      match c' with
+      | .done =>
+        if s'.sh.exitCode != 0 then (.xsNested (.xsOr "fail-continue") step, s', s2)
+        else (.xsNested (.xsOr "success-skip") step, s', .done)
+      | .exit_ => (.xsNested (.xsOr "propagate-exit") step, s', .exit_)
+      | .return_ => (.xsNested (.xsOr "propagate-return") step, s', .return_)
+      | .break_ n => (.xsNested (.xsOr "propagate-break") step, s', .break_ n)
+      | .continue_ n => (.xsNested (.xsOr "propagate-continue") step, s', .continue_ n)
+      | _ => (.xsNested (.xsOr "left") step, s', .or_ c' s2)
 
   -- Not
   | .not_ s1 =>
@@ -440,9 +524,21 @@ partial def stepEval (s : OsState α) (c : Stmt)
     | .done =>
       let ec := if s.sh.exitCode == 0 then 1 else 0
       (.xsNot "negate", exitWith ec s, .done)
+    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
+    | .return_ => (.xsSimple "propagate-return", s, .return_)
+    | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
+    | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
       let (step, s', c') := stepEval s s1
-      (.xsNot "body", s', .not_ c')
+      match c' with
+      | .done =>
+        let ec := if s'.sh.exitCode == 0 then 1 else 0
+        (.xsNested (.xsNot "negate") step, exitWith ec s', .done)
+      | .exit_ => (.xsNested (.xsNot "propagate-exit") step, s', .exit_)
+      | .return_ => (.xsNested (.xsNot "propagate-return") step, s', .return_)
+      | .break_ n => (.xsNested (.xsNot "propagate-break") step, s', .break_ n)
+      | .continue_ n => (.xsNested (.xsNot "propagate-continue") step, s', .continue_ n)
+      | _ => (.xsNested (.xsNot "body") step, s', .not_ c')
 
   -- If
   | .if_ cond then_ else_ =>
@@ -450,9 +546,21 @@ partial def stepEval (s : OsState α) (c : Stmt)
     | .done =>
       if s.sh.exitCode == 0 then (.xsIf "then", s, then_)
       else (.xsIf "else", s, else_)
+    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
+    | .return_ => (.xsSimple "propagate-return", s, .return_)
+    | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
+    | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
       let (step, s', c') := stepEval s cond
-      (.xsIf "cond", s', .if_ c' then_ else_)
+      match c' with
+      | .done =>
+        if s'.sh.exitCode == 0 then (.xsNested (.xsIf "then") step, s', then_)
+        else (.xsNested (.xsIf "else") step, s', else_)
+      | .exit_ => (.xsNested (.xsIf "propagate-exit") step, s', .exit_)
+      | .return_ => (.xsNested (.xsIf "propagate-return") step, s', .return_)
+      | .break_ n => (.xsNested (.xsIf "propagate-break") step, s', .break_ n)
+      | .continue_ n => (.xsNested (.xsIf "propagate-continue") step, s', .continue_ n)
+      | _ => (.xsNested (.xsIf "cond") step, s', .if_ c' then_ else_)
 
   -- While condition
   | .while_ cond body =>
@@ -466,23 +574,61 @@ partial def stepEval (s : OsState α) (c : Stmt)
       else
         let ec := match _savedEc with | some ec => ec | none => 0
         (.xsWhile "exit", exitWith ec { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .done)
+    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
+    | .return_ => (.xsSimple "propagate-return", s, .return_)
+    | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
+    | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
       let (step, s', c') := stepEval s curCond
-      (.xsWhile "cond", s', .whileCond origCond c' origBody _savedEc)
+      match c' with
+      | .done =>
+        if s'.sh.exitCode == 0 then (.xsNested (.xsWhile "body") step, s', .whileRunning origCond origBody origBody)
+        else
+          let ec := match _savedEc with | some ec => ec | none => 0
+          (.xsNested (.xsWhile "exit") step, exitWith ec { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
+      | .exit_ => (.xsNested (.xsWhile "propagate-exit") step, s', .exit_)
+      | .return_ => (.xsNested (.xsWhile "propagate-return") step, s', .return_)
+      | .break_ n => (.xsNested (.xsWhile "propagate-break") step, s', .break_ n)
+      | .continue_ n => (.xsNested (.xsWhile "propagate-continue") step, s', .continue_ n)
+      | _ => (.xsNested (.xsWhile "cond") step, s', .whileCond origCond c' origBody _savedEc)
 
   | .whileRunning origCond origBody curBody =>
     match curBody with
     | .done => (.xsWhile "loop", s, .whileCond origCond origCond origBody (some s.sh.exitCode))
+    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
+    | .return_ => (.xsSimple "propagate-return", s, .return_)
+    | .break_ n =>
+      if n ≤ 1 then
+        -- Break loop: decrement loopNest and exit
+        (.xsWhile "break-loop", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .done)
+      else
+        (.xsWhile "propagate-break", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .break_ (n - 1))
+    | .continue_ n =>
+      if n ≤ 1 then
+        -- Continue loop: next iteration (condition)
+        (.xsWhile "continue-loop", s, .whileCond origCond origCond origBody (some s.sh.exitCode))
+      else
+        (.xsWhile "propagate-continue", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .continue_ (n - 1))
     | _ =>
       let (step, s', c') := stepEval s curBody
-      (.xsWhile "body-step", s', .whileRunning origCond origBody c')
+      match c' with
+      | .done => (.xsNested (.xsWhile "loop") step, s', .whileCond origCond origCond origBody (some s'.sh.exitCode))
+      | .exit_ => (.xsNested (.xsWhile "propagate-exit") step, s', .exit_)
+      | .return_ => (.xsNested (.xsWhile "propagate-return") step, s', .return_)
+      | .break_ n =>
+        if n ≤ 1 then (.xsNested (.xsWhile "break-loop") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
+        else (.xsNested (.xsWhile "propagate-break") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .break_ (n - 1))
+      | .continue_ n =>
+        if n ≤ 1 then (.xsNested (.xsWhile "continue-loop") step, s', .whileCond origCond origCond origBody (some s'.sh.exitCode))
+        else (.xsNested (.xsWhile "propagate-continue") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .continue_ (n - 1))
+      | _ => (.xsNested (.xsWhile "body-step") step, s', .whileRunning origCond origBody c')
 
   -- For
   | .for_ var words body =>
     (.xsFor "expand", s, .forExpArgs var (.expStart { splitting := .split, globbing := true } words) body)
 
   | .forExpArgs var es body =>
-    let (step, s', es') := stepExpansion s es
+    let (step, s', es') := stepExpansion (stepEval' s) s es
     match es' with
     | .expDone fs => (.xsFor "expanded", s', .forExpanded var fs body)
     | _ => (.xsFor "expanding", s', .forExpArgs var es' body)
@@ -491,7 +637,9 @@ partial def stepEval (s : OsState α) (c : Stmt)
     let s' := { s with sh := { s.sh with loopNest := s.sh.loopNest + 1 } }
     match fs with
     | [] => (.xsFor "empty", { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
-    | _ => (.xsFor "start", s', .forRunning var fs body body)
+    | val :: fs' =>
+      let s'' := internalSetParam var val s'
+      (.xsFor "start", s'', .forRunning var fs' body body)
 
   | .forRunning var fs origBody curBody =>
     match curBody with
@@ -503,23 +651,74 @@ partial def stepEval (s : OsState α) (c : Stmt)
       | val :: fs' =>
         let s' := internalSetParam var val s
         (.xsFor "next", s', .forRunning var fs' origBody origBody)
+    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
+    | .return_ => (.xsSimple "propagate-return", s, .return_)
+    | .break_ n =>
+      if n ≤ 1 then (.xsFor "break-loop", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .done)
+      else (.xsFor "propagate-break", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .break_ (n - 1))
+    | .continue_ n =>
+      if n ≤ 1 then
+        match fs with
+        | [] => (.xsFor "continue-done", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .done)
+        | val :: fs' =>
+          let s' := internalSetParam var val s
+          (.xsFor "continue-next", s', .forRunning var fs' origBody origBody)
+      else
+        (.xsFor "propagate-continue", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .continue_ (n - 1))
     | _ =>
       match fs with
       | [] =>
         let (step, s', c') := stepEval s curBody
-        (.xsFor "body", s', .forRunning var [] origBody c')
+        match c' with
+        | .done =>
+          -- Should effectively be done (loop empty)
+           (.xsNested (.xsFor "body-done") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done) -- Weird case if fs empty but body running?
+        | .exit_ => (.xsNested (.xsFor "propagate-exit") step, s', .exit_)
+        | .return_ => (.xsNested (.xsFor "propagate-return") step, s', .return_)
+        | .break_ n =>
+           if n ≤ 1 then (.xsNested (.xsFor "break-loop") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
+           else (.xsNested (.xsFor "propagate-break") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .break_ (n - 1))
+        | .continue_ n =>
+           if n ≤ 1 then (.xsNested (.xsFor "continue-done") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
+           else (.xsNested (.xsFor "propagate-continue") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .continue_ (n - 1))
+        | _ => (.xsNested (.xsFor "body") step, s', .forRunning var [] origBody c')
       | val :: fs' =>
-        -- First iteration: set var and start body
-        let s' := internalSetParam var val s
-        let (step, s'', c') := stepEval s' curBody
-        (.xsFor "body", s'', .forRunning var fs' origBody c')
+        -- First iteration: set var and start body (wait, this logic was only for init? No, it's for `curBody` advancement)
+        -- If `fs` is present, it means we are in the middle of iterations.
+        -- But `curBody` is the active statement. `fs` is the REMAINING items.
+        -- Wait, the original logic had `match fs` inside `_` case.
+        -- `curBody` is the *current* execution. `fs` is the *future* items.
+        -- If `curBody` steps, we keep `fs`.
+        let (step, s', c') := stepEval s curBody
+        match c' with
+        | .done =>
+           -- Current iteration finished. Move to next.
+           match fs with
+           | [] => (.xsNested (.xsFor "loop-finish") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
+           | val' :: fs'' =>
+             let s'' := internalSetParam var val' s'
+             (.xsNested (.xsFor "loop-next") step, s'', .forRunning var fs'' origBody origBody)
+        | .exit_ => (.xsNested (.xsFor "propagate-exit") step, s', .exit_)
+        | .return_ => (.xsNested (.xsFor "propagate-return") step, s', .return_)
+        | .break_ n =>
+           if n ≤ 1 then (.xsNested (.xsFor "break-loop") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
+           else (.xsNested (.xsFor "propagate-break") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .break_ (n - 1))
+        | .continue_ n =>
+           if n ≤ 1 then
+             match fs with
+             | [] => (.xsNested (.xsFor "continue-finish") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
+             | val' :: fs'' =>
+               let s'' := internalSetParam var val' s'
+               (.xsNested (.xsFor "continue-next") step, s'', .forRunning var fs'' origBody origBody)
+           else (.xsNested (.xsFor "propagate-continue") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .continue_ (n - 1))
+        | _ => (.xsNested (.xsFor "body") step, s', .forRunning var (val :: fs') origBody c')
 
   -- Case
   | .case_ w cases =>
     (.xsCase "expand", s, .caseExpArg (.expStart { splitting := .noSplit, globbing := false } w) cases)
 
   | .caseExpArg es cases =>
-    let (step, s', es') := stepExpansion s es
+    let (step, s', es') := stepExpansion (stepEval' s) s es
     match es' with
     | .expDone fs =>
       let ss := fs.flatMap id
@@ -535,7 +734,7 @@ partial def stepEval (s : OsState α) (c : Stmt)
       (.xsCase "testing", s, .caseCheckMatch ss es body rest)
 
   | .caseCheckMatch ss es body rest =>
-    let (_step, s', es') := stepExpansion s es
+    let (_step, s', es') := stepExpansion (stepEval' s) s es
     match es' with
     | .expDone fs =>
       let pat := fs.flatMap id
@@ -563,29 +762,99 @@ partial def stepEval (s : OsState α) (c : Stmt)
       (.xsStack funcName step, s', .call outerLoopNest outerParams funcName origBody c')
 
   -- Pipe
-  | .pipe _bgMode cmds =>
-    match OS.osPipe s with
-    | .inl err => (.xsPipe "error", failWith err s, .done)
-    | .inr (s', _, _) =>
-      -- Simplified: just run first in the pipe
-      match cmds with
-      | [] => (.xsPipe "empty", s', .done)
-      | [cmd] =>
-        (.xsPipe "single", s', cmd)
-      | _ =>
-        (.xsPipe "multi", s', .done)  -- simplified for now
+  | .pipe bgMode cmds =>
+    match runPipe s cmds bgMode with
+    | .inl err =>
+      (.xsPipe "couldn't start pipe",
+       failWith s!"couldn't create pipeline: {err}" s,
+       .done)
+    | .inr (s1, pipeline, lastPid) =>
+      let (s2, _job) := addJob s1 pipeline lastPid (.pipe bgMode cmds) bgMode .jobRunning
+      if isBg bgMode
+      then (.xsPipe "started pipe", setLastPid lastPid s2, .done)
+      else (.xsPipe "started pipe", s2, .wait lastPid .unchecked none .waitInternal)
 
-  -- Subshell
-  | .subshell stmt (_ers, _mxr, _rs) =>
-    (.xsSubshell "fork", s, stmt)
+  -- Redir: all redirects expanded
+  | .redir stmt' (ers, none, []) =>
+    match doRedirs s ers with
+    | (s1, .inl msg) =>
+      (.xsRedir "error in redirection", failWith msg s1, .done)
+    | (s1, .inr savedFds) =>
+      (.xsRedir "running redirected command", s1, pushredir' stmt' savedFds)
 
-  -- Background
-  | .background stmt _ =>
-    (.xsBackground "fork", s, stmt)
+  -- Redir: expanding redirects
+  | .redir stmt' (ers, none, r :: rs) =>
+    let xr := match r with
+      | .rfile ty fd w => ExpandingRedir.xrFile ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+      | .rdup ty fd w => ExpandingRedir.xrDup ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+      | .rheredoc ty fd w => ExpandingRedir.xrHeredoc ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+    (.xsRedir "starting", s, .redir stmt' (ers, some xr, rs))
 
-  -- Redir
-  | .redir stmt (_ers, _mxr, _rs) =>
-    (.xsRedir "setup", s, stmt)
+  -- Redir: stepping an expanding redirect
+  | .redir stmt' (ers, some xr, rs) =>
+    match stepRedir (stepEval' s) s xr with
+    | .redirExpDone s' er =>
+      (.xsRedir "expanding", s', .redir stmt' (ers ++ [er], none, rs))
+    | .redirExpStep step s' xr' =>
+      (.xsExpand (.xsRedir "redirect") step, s', .redir stmt' (ers, some xr', rs))
+    | .redirExpError msg =>
+      (.xsRedir "error in redirect expansion", failWith msg s, .done)
+
+  -- Background: all redirects expanded
+  | .background stmt' (ers, none, []) =>
+    let redirState' : RedirState :=
+      if !s.sh.opts.any (· == .monitor) && !ers.any expandedRedirHasStdinRedir
+      then (.erFile .from_ 0 (symbolicStringOfString "/dev/null") :: ers, none, [])
+      else (ers, none, [])
+    let (s1, pid) := OS.osForkAndSubshell s (.redir stmt' redirState') .bg none true
+    let (s2, _job) := addJob s1 [(pid, .background stmt' (ers, none, []))] pid (.background stmt' (ers, none, [])) .bg .jobRunning
+    let s3 := setLastPid pid s2
+    (.xsBackground s!"started background process with pid {pid}", s3, .done)
+
+  -- Background: expanding redirects
+  | .background stmt' (ers, none, r :: rs) =>
+    let xr := match r with
+      | .rfile ty fd w => ExpandingRedir.xrFile ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+      | .rdup ty fd w => ExpandingRedir.xrDup ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+      | .rheredoc ty fd w => ExpandingRedir.xrHeredoc ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+    (.xsBackground "starting redir", s, .background stmt' (ers, some xr, rs))
+
+  | .background stmt' (ers, some xr, rs) =>
+    match stepRedir (stepEval' s) s xr with
+    | .redirExpDone s' er =>
+      (.xsBackground "expanding", s', .background stmt' (ers ++ [er], none, rs))
+    | .redirExpStep step s' xr' =>
+      (.xsExpand (.xsBackground "redirect") step, s', .background stmt' (ers, some xr', rs))
+    | .redirExpError msg =>
+      (.xsBackground "error in redirect expansion", failWith msg s, .done)
+
+  -- Subshell: all redirects expanded
+  | .subshell stmt' (ers, none, []) =>
+    match doRedirs s ers with
+    | (s1, .inl msg) =>
+      (.xsSubshell "error in redirection", failWith msg s1, .done)
+    | (s1, .inr savedFds) =>
+      let (s2, pid) := OS.osForkAndSubshell s1 stmt' .fg none true
+      (.xsSubshell s!"started subshell with pid {pid}",
+       restoreFds s2 savedFds,
+       .wait pid .unchecked none .waitInternal)
+
+  -- Subshell: expanding redirects
+  | .subshell stmt' (ers, none, r :: rs) =>
+    let xr := match r with
+      | .rfile ty fd w => ExpandingRedir.xrFile ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+      | .rdup ty fd w => ExpandingRedir.xrDup ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+      | .rheredoc ty fd w => ExpandingRedir.xrHeredoc ty fd (.expStart { splitting := .noSplit, globbing := false } w)
+    (.xsSubshell "starting redir", s, .subshell stmt' (ers, some xr, rs))
+
+  | .subshell stmt' (ers, some xr, rs) =>
+    match stepRedir (stepEval' s) s xr with
+    | .redirExpDone s' er =>
+      (.xsSubshell "expanding", s', .subshell stmt' (ers ++ [er], none, rs))
+    | .redirExpStep step s' xr' =>
+      (.xsExpand (.xsSubshell "redirect") step, s', .subshell stmt' (ers, some xr', rs))
+    | .redirExpError msg =>
+      (.xsSubshell "error in redirect expansion", failWith msg s, .done)
 
   -- Break / continue
   | .break_ n =>
@@ -652,84 +921,14 @@ partial def stepEval (s : OsState α) (c : Stmt)
       let (_step, s', c') := stepEval s cmd
       (.xsEval linno src "running", s', .evalLoopCmd linno _ctx src _mode _level c')
 
-  -- Exec — inline builtin dispatch for common builtins
-  | .exec _cmdPath cmdName args _env _binsh =>
-    let (_, _concSS, progName) := concretize s cmdName
-    let argv := cmdName :: args.map id
-    -- Inline dispatch for the most common builtins
-    match progName with
-    | "echo" =>
-      let echoArgs := match argv with | [] => [] | _ :: rest => rest
-      let strs := echoArgs.filterMap tryConcrete
-      let msg := String.intercalate " " strs ++ "\n"
-      let s' := writeStdout msg s
-      (.xsSimple "builtin-echo", exitWith 0 s', .done)
-    | "true" => (.xsSimple "builtin-true", exitWith 0 s, .done)
-    | "false" => (.xsSimple "builtin-false", exitWith 1 s, .done)
-    | ":" => (.xsSimple "builtin-colon", exitWith 0 s, .done)
-    | "exit" =>
-      let ec := match argv with
-        | [] | [_] => s.sh.exitCode
-        | [_, n] => match tryConcrete n with
-          | some ns => match readNat ns.toList with | .ok v => v | .error _ => 2
-          | none => 2
-        | _ => 2
-      (.xsSimple "builtin-exit", exitWith ec s, .exit_)
-    | "cd" =>
-      match argv with
-      | _ :: dirArg :: _ =>
-        match tryConcrete dirArg with
-        | some dir =>
-          let (s', err) := OS.osChdir s dir
-          match err with
-          | none => (.xsSimple "builtin-cd", exitWith 0 s', .done)
-          | some e => (.xsSimple "builtin-cd", failWith ("cd: " ++ e) s', .done)
-        | none => (.xsSimple "builtin-cd", failWith "cd: symbolic argument" s, .done)
-      | _ =>
-        match lookupConcreteParam s "HOME" with
-        | some home =>
-          let (s', _err) := OS.osChdir s home
-          (.xsSimple "builtin-cd", exitWith 0 s', .done)
-        | none => (.xsSimple "builtin-cd", failWith "cd: HOME not set" s, .done)
-    | "pwd" =>
-      let cwd := OS.osPhysicalCwd s
-      (.xsSimple "builtin-pwd", exitWith 0 (writeStdout (cwd ++ "\n") s), .done)
-    | "export" =>
-      let expArgs := match argv with | [] => [] | _ :: rest => rest
-      let s' := expArgs.foldl (fun os arg =>
-        match tryConcrete arg with
-        | some astr =>
-          let parts := splitStringOn false '=' astr
-          match parts with
-          | [name] =>
-            { os with sh := { os.sh with export_ :=
-              if name ∈ os.sh.export_ then os.sh.export_ else name :: os.sh.export_ } }
-          | name :: valParts =>
-            let val := String.intercalate "=" valParts
-            let os' := internalSetParam name (symbolicStringOfString val) os
-            { os' with sh := { os'.sh with export_ :=
-              if name ∈ os'.sh.export_ then os'.sh.export_ else name :: os'.sh.export_ } }
-          | _ => os
-        | none => os) s
-      (.xsSimple "builtin-export", exitWith 0 s', .done)
-    | "unset" =>
-      let unArgs := match argv with | [] => [] | _ :: rest => rest
-      let s' := unArgs.foldl (fun os arg =>
-        match tryConcrete arg with
-        | some name =>
-          match unsetParam name os with
-          | .ok os' => os'
-          | .error _ => os
-        | none => os) s
-      (.xsSimple "builtin-unset", exitWith 0 s', .done)
-    | _ =>
-      -- External command — use OS exec (symbolic no-op)
-      let s' := OS.osExecve s cmdName
-      (.xsExec "exec", s', .done)
 
-  -- CommandExpAssign: expanding command assignments
+  -- Simple command execution (invoked via runCommand dispatch)
+  | .exec path prog args env binsh =>
+    -- Dispatch via Shell typeclass
+    Shell.runCommand s { shouldFork := false, ranCmdSubst := false, forceSimpleCommand := false } .unchecked prog args env []
+
   | .commandExpAssign ((x, es) :: assigns) args savedFds opts =>
-    let (step, s', es') := stepExpansion s es
+    let (step, s', es') := stepExpansion (stepEval' s) s es
     match es' with
     | .expDone f =>
       match forceLocalParam s' x (symbolicStringOfFields f) with
@@ -789,6 +988,6 @@ partial def stepEval (s : OsState α) (c : Stmt)
 where
   stepEval' (_s : OsState α) : StepFun α := fun os stmt =>
     let (_step, os', stmt') := stepEval os stmt
-    (os', match stmt' with | .done => .inr (some os'.sh.exitCode) | _ => .inl _step)
+    (os', match stmt' with | .done => .inr (some os'.sh.exitCode) | _ => .inl (_step, stmt'))
 
 end Semantics

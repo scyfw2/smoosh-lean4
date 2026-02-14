@@ -347,53 +347,72 @@ def evalBinOp (op : BinaryOperator) (l r : Int) : Except String Int :=
   | .boolAnd => .ok (if l != 0 && r != 0 then 1 else 0)
   | .boolOr => .ok (if l != 0 || r != 0 then 1 else 0)
 
-partial def evalArith (getVar : String → Int) (setVar : String → Int → Unit)
-    (e : ArithExp) : Except String Int :=
+
+
+abbrev ArithM (σ : Type) := StateT σ (Except String)
+
+def updateVar {σ} (setVar : σ → String → Int → Except String σ) (s : String) (v : Int) : ArithM σ Unit := do
+  let st ← get
+  match setVar st s v with
+  | .ok newSt => set newSt
+  | .error e => throw e
+
+partial def evalArith {σ : Type} (getVar : σ → String → Int) (setVar : σ → String → Int → Except String σ)
+    (e : ArithExp) : ArithM σ Int :=
   match e with
-  | .num n => .ok n
-  | .var s => .ok (getVar s)
+  | .num n => return n
+  | .var s => do
+    let st ← get
+    return getVar st s
   | .binOp op l r => do
     let lv ← evalArith getVar setVar l
     let rv ← evalArith getVar setVar r
-    evalBinOp op lv rv
+    match evalBinOp op lv rv with
+    | .ok res => return res
+    | .error msg => throw msg
   | .unaryPlus e' => evalArith getVar setVar e'
   | .unaryMinus e' => do
     let v ← evalArith getVar setVar e'
-    .ok (-v)
+    return -v
   | .bitNot e' => do
     let v ← evalArith getVar setVar e'
-    .ok (-(v + 1))
+    return -(v + 1)
   | .boolNot e' => do
     let v ← evalArith getVar setVar e'
-    .ok (if v == 0 then 1 else 0)
-  | .preIncr s =>
-    let v := getVar s + 1
-    let _ := setVar s v
-    .ok v
-  | .preDecr s =>
-    let v := getVar s - 1
-    let _ := setVar s v
-    .ok v
-  | .postIncr s =>
-    let v := getVar s
-    let _ := setVar s (v + 1)
-    .ok v
-  | .postDecr s =>
-    let v := getVar s
-    let _ := setVar s (v - 1)
-    .ok v
+    return (if v == 0 then 1 else 0)
+  | .preIncr s => do
+    let st ← get
+    let v := getVar st s + 1
+    updateVar setVar s v
+    return v
+  | .preDecr s => do
+    let st ← get
+    let v := getVar st s - 1
+    updateVar setVar s v
+    return v
+  | .postIncr s => do
+    let st ← get
+    let v := getVar st s
+    updateVar setVar s (v + 1)
+    return v
+  | .postDecr s => do
+    let st ← get
+    let v := getVar st s
+    updateVar setVar s (v - 1)
+    return v
   | .conditional cond t f => do
     let cv ← evalArith getVar setVar cond
     if cv != 0 then evalArith getVar setVar t
     else evalArith getVar setVar f
   | .assignVar s mop rhs => do
     let rv ← evalArith getVar setVar rhs
+    let st ← get
     let v := match mop with
       | none => rv
       | some op =>
-        let lv := getVar s
+        let lv := getVar st s
         match evalBinOp op lv rv with
         | .ok r => r
-        | .error _ => rv  -- fallback
-    let _ := setVar s v
-    .ok v
+        | .error _ => rv -- fallback
+    updateVar setVar s v
+    return v

@@ -66,17 +66,43 @@ structure OsState (α : Type) where
 
 /-! # Step function type -/
 
-def StepFun (α : Type) := OsState α → Stmt → OsState α × Sum EvaluationStep (Option Nat)
+def StepFun (α : Type) := OsState α → Stmt → OsState α × Sum (EvaluationStep × Stmt) (Option Nat)
 
 /-! # Parameter helpers -/
 
 def lookupStringParam (os : OsState α) (x : String) : Option SymbolicString :=
-  match os.sh.locals.findSome? (fun frame => frame.findSome? (fun (y, v) => if x == y then v.1 else none)) with
-  | some v => some v
-  | none =>
-    match os.sh.env.find? (fun (y, _) => x == y) with
-    | some (_, v) => some v
-    | none => none
+  -- Handle positional params: pure numeric strings
+  match readNat x.toList with
+  | .ok n =>
+    let rec getAt : Nat → List SymbolicString → Option SymbolicString
+      | _, [] => none
+      | 0, x :: _ => some x
+      | n+1, _ :: xs => getAt n xs
+    getAt n os.sh.positionalParams
+  | .error _ =>
+  -- Handle special parameters
+  match x with
+  | "$" => some (symbolicStringOfString (toString os.sh.rootpid))
+  | "?" => some (symbolicStringOfString (toString os.sh.exitCode))
+  | "#" =>
+    let nParams := match os.sh.positionalParams with
+      | [] => 0
+      | _ :: rest => rest.length
+    some (symbolicStringOfString (toString nParams))
+  | "-" =>
+    let optChars := os.sh.opts.filterMap ShOpt.charOfShOpt
+    some (symbolicStringOfString (String.ofList optChars))
+  | "!" => os.sh.lastPid.map (fun pid => symbolicStringOfString (toString pid))
+  | "@" => none  -- handled specially in expandParam
+  | "*" => none  -- handled specially in expandParam
+  | _ =>
+    -- Check locals first, then env
+    match os.sh.locals.findSome? (fun frame => frame.findSome? (fun (y, v) => if x == y then v.1 else none)) with
+    | some v => some v
+    | none =>
+      match os.sh.env.find? (fun (y, _) => x == y) with
+      | some (_, v) => some v
+      | none => none
 
 def lookupConcreteParam (os : OsState α) (x : String) : Option String :=
   match lookupStringParam os x with
@@ -440,9 +466,41 @@ def doRedirs (os : OsState α) (ers : List ExpandedRedir) : OsState α × Sum St
   else reallyDoRedirs os ers
 
 /-- Pipe execution -/
-def forkPipeSubshell (os : OsState α) (stmt : Stmt) (bgm : BgMode) (pgid : Option Pid) (last : Bool) (_pipeline : PipelineInfo) : OsState α × PipelineInfo × Pid :=
+def forkPipeSubshell (os : OsState α) (stmt : Stmt) (bgm : BgMode) (pgid : Option Pid) (last : Bool) (pipeline : PipelineInfo) : OsState α × PipelineInfo × Pid :=
   let (os1, pid) := OS.osForkAndSubshell os stmt bgm pgid last
-  (os1, [], pid)
+  (os1, pipeline, pid)
+
+/-- Set the last background PID -/
+def setLastPid (pid : Pid) (os : OsState α) : OsState α :=
+  { os with sh := { os.sh with lastPid := some pid } }
+
+/-- Delete a job by PID -/
+def deleteJobWithPid (os : OsState α) (pid : Pid) : OsState α :=
+  { os with sh := { os.sh with jobs := os.sh.jobs.filter (fun j => j.pid != pid) } }
+
+/-- Add a job to the job list -/
+def addJob (os : OsState α) (pipeline : PipelineInfo) (pid : Pid) (cmd : Stmt) (bgm : BgMode) (status : JobStatus) : OsState α × JobInfo :=
+  let highestId := match os.sh.jobs with
+    | [] => 0
+    | jobs => jobs.foldl (fun acc j => max acc j.id) 0
+  let newJob : JobInfo := {
+    id := highestId + 1,
+    pid := pid,
+    cmd := cmd,
+    status := status,
+    pipeline := pipeline
+  }
+  ({ os with sh := { os.sh with jobs := newJob :: os.sh.jobs } }, newJob)
+
+/-- Check if bg mode -/
+def isBg : BgMode → Bool
+  | .bg => true
+  | .fg => false
+
+/-- Check if running interactively -/
+def isInteractive (os : OsState α) : Bool :=
+  os.sh.opts.any (· == .interactive)
+
 
 /-- Parameter management -/
 def xtrace (msg : String) (os : OsState α) : OsState α :=
@@ -480,6 +538,10 @@ def pushLocals (os : OsState α) (env : Env) : OsState α :=
   let frame := env.map (fun (x, v) => (x, (some v, localOptsDefault)))
   { os with sh := { os.sh with locals := frame :: os.sh.locals } }
 
+/-- Push a new empty local scope — for command assignment expansion -/
+def newLocalScope (os : OsState α) : OsState α :=
+  { os with sh := { os.sh with locals := [] :: os.sh.locals } }
+
 /-- Write to topmost local scope (returns error for readonly) -/
 def forceLocalParam (os : OsState α) (x : String) (v : SymbolicString) : Sum String (OsState α) :=
   match os.sh.locals with
@@ -494,6 +556,48 @@ def forceLocalParam (os : OsState α) (x : String) (v : SymbolicString) : Sum St
 /-- Close a file descriptor -/
 def closeFd (os : OsState α) (fd : Fd) : OsState α :=
   OS.osCloseFd os fd
+
+/-- Run a pipe loop — connects processes with pipe FDs -/
+def runPipeLoop (os : OsState α) (stmts : List Stmt) (fdPrev : Fd) (bgm : BgMode) (pgid : Option Pid) (pipeline : PipelineInfo) :
+    Sum String (OsState α × PipelineInfo × Pid) :=
+  match stmts with
+  | [] =>
+    .inr (forkPipeSubshell os .done bgm pgid true pipeline)
+  | [stmt] =>
+    let (os1, pipeline', lastPid) := forkPipeSubshell os
+      (withRedirs (tryAvoidFork stmt) [.erDup .toFD .closeOrig STDIN (some fdPrev)])
+      bgm pgid true pipeline
+    let os2 := closeFd os1 fdPrev
+    .inr (os2, ((lastPid, stmt) :: pipeline').reverse, lastPid)
+  | stmt :: stmts' =>
+    match OS.osPipe os with
+    | .inl err => .inl err
+    | .inr (os1, fdNext, fdWrite) =>
+      let (os2, pipeline', pid) := forkPipeSubshell os1
+        (withRedirs (closeFdAndThen fdNext stmt)
+          [.erDup .toFD .closeOrig STDIN (some fdPrev),
+           .erDup .toFD .closeOrig STDOUT (some fdWrite)])
+        bgm pgid false pipeline
+      let os3 := closeFd os2 fdPrev
+      let os4 := closeFd os3 fdWrite
+      runPipeLoop os4 stmts' fdNext bgm (some pid) ((pid, stmt) :: pipeline')
+
+/-- Run a pipeline — entry point -/
+def runPipe (os : OsState α) (stmts : List Stmt) (bgm : BgMode) :
+    Sum String (OsState α × PipelineInfo × Pid) :=
+  match stmts with
+  | [] => .inr (forkPipeSubshell os .done bgm none true [])
+  | [stmt] => .inr (forkPipeSubshell os stmt bgm none true [])
+  | stmt :: stmts' =>
+    match OS.osPipe os with
+    | .inl err => .inl err
+    | .inr (os1, fdNext, fdWrite) =>
+      let (os2, pipeline, pid) := forkPipeSubshell os1
+        (withRedirs (closeFdAndThen fdNext stmt)
+          [.erDup .toFD .closeOrig STDOUT (some fdWrite)])
+        bgm none false []
+      let os3 := closeFd os2 fdWrite
+      runPipeLoop os3 stmts' fdNext bgm (some pid) ((pid, stmt) :: pipeline)
 
 /-- Shell option management -/
 def setShOpt (os : OsState α) (opt : ShOpt) : OsState α :=

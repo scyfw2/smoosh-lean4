@@ -19,6 +19,9 @@ def collectNonIfs (ifs : List Char) : List Char → List Char × List Char
 
 /-! # Expanded string splitting by IFS -/
 
+-- Split a string by IFS characters. Returns a non-empty list:
+-- The FIRST element should be concatenated with the current field being built.
+-- Remaining elements become new fields.
 partial def splitExpstring (ifs : List Char) (clst : List Char) : List (List Char) :=
   match clst with
   | [] => [[]]
@@ -33,24 +36,58 @@ partial def splitExpstring (ifs : List Char) (clst : List Char) : List (List Cha
 
 /-! # Word splitting -/
 
-partial def splitWord (ifs : List Char) : IntermediateFields × ExpandedWords → IntermediateFields
-  | (f, []) => f
-  | (f, .usrF :: wrds) =>
-    -- IFS field split
-    f ++ [.wfs] ++ splitWord ifs ([], wrds)
-  | (f, .expS s :: wrds) =>
-    let parts := splitExpstring ifs s.toList
-    let fields := parts.map (fun p => TmpField.field (symbolicStringOfString (String.ofList p)))
-    f ++ fields ++ splitWord ifs ([], wrds)
-  | (f, .usrS s :: wrds) =>
-    f ++ [.field (symbolicStringOfString s)] ++ splitWord ifs ([], wrds)
-  | (f, .at_ fs :: wrds) =>
-    let fields := fs.map (fun ss => TmpField.field ss)
-    f ++ fields ++ splitWord ifs ([], wrds)
-  | (f, .dquo ss :: wrds) =>
-    f ++ [.qfield ss] ++ splitWord ifs ([], wrds)
-  | (f, .ewSym sym :: wrds) =>
-    f ++ [.field [.sym sym]] ++ splitWord ifs ([], wrds)
+-- splitWord accumulates a current field (curField) and produces IntermediateFields.
+-- Adjacent expanded words without .usrF are concatenated into the same field.
+partial def splitWord (ifs : List Char) : SymbolicString × ExpandedWords → IntermediateFields
+  | (curField, []) =>
+    -- Flush remaining current field
+    if curField.isEmpty then [] else [.field curField]
+  | (curField, .usrF :: wrds) =>
+    -- User field separator: flush current field, add separator
+    let flushed := if curField.isEmpty then [] else [.field curField]
+    flushed ++ [.wfs] ++ splitWord ifs ([], wrds)
+  | (curField, .expS s :: wrds) =>
+    if s.isEmpty then
+      -- Empty expanded string: just continue building current field
+      splitWord ifs (curField, wrds)
+    else
+      let parts := splitExpstring ifs s.toList
+      match parts with
+      | [] => splitWord ifs (curField, wrds)
+      | [single] =>
+        -- No splits: concatenate with current field
+        splitWord ifs (curField ++ symbolicStringOfString (String.ofList single), wrds)
+      | first :: rest =>
+        -- Multiple parts: first extends current field, middle parts become fields,
+        -- last part becomes the new current field for next iteration
+        let firstField := curField ++ symbolicStringOfString (String.ofList first)
+        let lastPart := rest.getLast!
+        let middleParts := rest.dropLast
+        let fields := (if firstField.isEmpty then [] else [TmpField.field firstField]) ++
+          middleParts.map (fun p => TmpField.field (symbolicStringOfString (String.ofList p)))
+        splitWord ifs (symbolicStringOfString (String.ofList lastPart), wrds) |> (fields ++ ·)
+  | (curField, .usrS s :: wrds) =>
+    -- User string: concatenate with current field (no IFS splitting)
+    splitWord ifs (curField ++ symbolicStringOfString s, wrds)
+  | (curField, .at_ fs :: wrds) =>
+    -- Positional @ args: each becomes a separate field
+    match fs with
+    | [] => splitWord ifs (curField, wrds)
+    | [single] =>
+      -- Single @ element: concatenate with current field
+      splitWord ifs (curField ++ single, wrds)
+    | first :: rest =>
+      let firstField := curField ++ first
+      let lastPart := rest.getLast!
+      let middleParts := rest.dropLast
+      let fields := [TmpField.field firstField] ++
+        middleParts.map (fun ss => TmpField.field ss)
+      splitWord ifs (lastPart, wrds) |> (fields ++ ·)
+  | (curField, .dquo ss :: wrds) =>
+    -- Quoted string: concatenate with current field (no splitting)
+    splitWord ifs (curField ++ ss, wrds)
+  | (curField, .ewSym sym :: wrds) =>
+    splitWord ifs (curField ++ [.sym sym], wrds)
 
 /-! # Concat expanded words -/
 
@@ -116,6 +153,7 @@ def removeQuotes : IntermediateFields → IntermediateFields
   | [] => []
   | .qfield s :: rst => .field s :: removeQuotes rst
   | f :: rst => f :: removeQuotes rst
+
 
 def toFields : IntermediateFields → Fields
   | [] => []

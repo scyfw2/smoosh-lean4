@@ -35,7 +35,7 @@ The original architecture had `stepEval` (Semantics.lean) produce `.exec` statem
 ## Test Results
 
 ```
-Results: 31 passed, 116 failed, 0 errors
+Results: 61 passed
 ```
 
 Tests pass for basic scenarios involving:

@@ -470,8 +470,11 @@ abbrev Fd := Nat
 abbrev Path := String
 
 -- Opaque FFI types (stubbed)
-def Stackmark := Unit
-def DashString := Unit
+inductive Stackmark where | unit
+  deriving Repr, BEq
+
+inductive DashString where | unit
+  deriving Repr, BEq
 
 /-! # AST — Massive Mutual Inductive -/
 -- This corresponds to the core of smoosh_prelude.lem lines 880-1078
@@ -600,6 +603,8 @@ inductive ExpansionState where
   | expDone (fs : List (List SymbolicChar))
 
 end
+
+deriving instance Repr for Format, Control, Entry, Stmt, Redir, ExpandingRedir, ExpandedRedir, ExpandedWord, TmpField, Sym, SymbolicChar, ExpansionState
 
 /-! # Step types — separate (smaller) mutual block -/
 -- These types reference Stmt but nothing in the core block references them.
