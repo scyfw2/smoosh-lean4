@@ -1,0 +1,16 @@
+name = "smoosh"
+version = "0.1.0"
+keywords = ["math"]
+defaultTargets = ["Smoosh"]
+
+[leanOptions]
+pp.unicode.fun = true       # pretty-prints `fun a ↦ b`
+relaxedAutoImplicit = false
+
+
+[[lean_lib]]
+name = "Smoosh"
+
+[[lean_exe]]
+name = "smoosh-test"
+root = "Main"
