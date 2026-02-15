@@ -203,12 +203,129 @@ partial def parseTestExprUnary (toks : List String)
   | [] => .error "expected unary operator, found end of input"
 end
 
-def parseTestExpr (toks : List String) : Except String TestExpr :=
-  match parseTestExprDisjunction toks with
-  | .error err => .error s!"parse error in '{String.intercalate " " toks}': {err}"
-  | .ok (expr, []) => .ok expr
-  | .ok (expr, restToks) =>
-    .error s!"unexpected input after {stringOfTestExpr expr}: {String.intercalate " " restToks}"
+/-! # POSIX algorithm-based test parsing -/
+
+/-- Check if a string is a binary primary -/
+def isBinaryPrimary (s : String) : Bool :=
+  s ∈ ["=", "!=", ">", "<", "-eq", "-ne", "-gt", "-ge", "-lt", "-le",
+       "-nt", "-ot", "-ef"]
+
+/-- Check if a string is a unary primary -/
+def isUnaryPrimary (s : String) : Bool :=
+  s ∈ ["-b", "-c", "-d", "-e", "-f", "-g", "-h", "-L", "-k", "-n",
+       "-p", "-r", "-S", "-s", "-t", "-u", "-w", "-x", "-z"]
+
+/-- Parse a binary test expression from two operands and an operator -/
+def parseBinaryTest (s1 op s2 : String) : Except String TestExpr :=
+  match op with
+  | "=" => .ok (.testEqStr s1 s2)
+  | "!=" => .ok (.testNot (.testEqStr s1 s2))
+  | ">" => .ok (.testGtStr s1 s2)
+  | "<" => .ok (.testGtStr s2 s1)
+  | "-nt" => .ok (.testNewerFile s1 s2)
+  | "-ot" => .ok (.testOlderFile s1 s2)
+  | "-ef" => .ok (.testSameFile s1 s2)
+  | "-eq" | "-ne" | "-gt" | "-ge" | "-lt" | "-le" =>
+    match readTwoNats s1 s2 op with
+    | .error msg => .error msg
+    | .ok (n1, n2) =>
+      match op with
+      | "-eq" => .ok (.testEqNum n1 n2)
+      | "-ne" => .ok (.testNot (.testEqNum n1 n2))
+      | "-gt" => .ok (.testGtNum n1 n2)
+      | "-ge" => .ok (.testNot (.testGtNum n2 n1))
+      | "-lt" => .ok (.testGtNum n2 n1)
+      | "-le" => .ok (.testNot (.testGtNum n1 n2))
+      | _ => .error s!"unexpected binary operator {op}"
+  | _ => .error s!"unexpected binary operator {op}"
+
+/-- Parse a unary test expression -/
+def parseUnaryTest (op arg : String) : Except String TestExpr :=
+  match op with
+  | "-b" => .ok (.testBlock arg)
+  | "-c" => .ok (.testCharacter arg)
+  | "-d" => .ok (.testDirectory arg)
+  | "-e" => .ok (.testExists arg)
+  | "-f" => .ok (.testFile arg)
+  | "-g" => .ok (.testSetgid arg)
+  | "-h" | "-L" => .ok (.testSymlink arg)
+  | "-k" => .ok (.testSticky arg)
+  | "-n" => .ok (.testNot (.testEmptyStr arg))
+  | "-p" => .ok (.testFifo arg)
+  | "-r" => .ok (.testReadable arg)
+  | "-S" => .ok (.testSocket arg)
+  | "-s" => .ok (.testNonemptyFile arg)
+  | "-t" =>
+    match readNat arg.toList with
+    | .error msg => .error s!"expected fd number after -t, found '{arg}' ({msg})"
+    | .ok fd => .ok (.testTerminalFD fd)
+  | "-u" => .ok (.testSetuid arg)
+  | "-w" => .ok (.testWriteable arg)
+  | "-x" => .ok (.testExecutable arg)
+  | "-z" => .ok (.testEmptyStr arg)
+  | _ => .error s!"unknown unary operator {op}"
+
+/-- POSIX algorithm-based test expression parsing.
+    For 0-4 arguments, uses the POSIX standardized algorithm.
+    For 4+ arguments, uses the recursive descent parser. -/
+partial def parseTestExpr (toks : List String) : Except String TestExpr :=
+  match toks with
+  -- 0 args: exit false (represented as empty string test)
+  | [] => .ok (.testEmptyStr "")
+  -- 1 arg: true if non-null
+  | [s] => .ok (.testNot (.testEmptyStr s))
+  -- 2 args
+  | [s1, s2] =>
+    if s1 == "!" then
+      -- negate single-arg result
+      match parseTestExpr [s2] with
+      | .ok e => .ok (.testNot e)
+      | .error e => .error e
+    else if isUnaryPrimary s1 then
+      parseUnaryTest s1 s2
+    else
+      .error s!"unknown unary operator {s1}"
+  -- 3 args: POSIX algorithm
+  | [s1, s2, s3] =>
+    if isBinaryPrimary s2 then
+      -- $2 is binary primary: perform binary test
+      parseBinaryTest s1 s2 s3
+    else if s1 == "!" then
+      -- $1 is "!": negate 2-arg result
+      match parseTestExpr [s2, s3] with
+      | .ok e => .ok (.testNot e)
+      | .error e => .error e
+    else if s1 == "(" && s3 == ")" then
+      -- ($2): treat as 1-arg test of $2
+      parseTestExpr [s2]
+    else
+      .error s!"unexpected 3-arg test expression: {s1} {s2} {s3}"
+  -- 4 args
+  | [s1, s2, s3, s4] =>
+    if s1 == "!" then
+      -- negate 3-arg result
+      match parseTestExpr [s2, s3, s4] with
+      | .ok e => .ok (.testNot e)
+      | .error e => .error e
+    else if s1 == "(" && s4 == ")" then
+      -- ($2 $3): treat as 2-arg test
+      match parseTestExpr [s2, s3] with
+      | .ok e => .ok e
+      | .error e => .error e
+    else
+      -- Fall through to recursive descent for complex expressions
+      match parseTestExprDisjunction toks with
+      | .error err => .error s!"parse error in '{String.intercalate " " toks}': {err}"
+      | .ok (expr, []) => .ok expr
+      | .ok (expr, restToks) =>
+        .error s!"unexpected input after {stringOfTestExpr expr}: {String.intercalate " " restToks}"
+  -- 5+ args: use recursive descent parser
+  | _ =>
+    match parseTestExprDisjunction toks with
+    | .error err => .error s!"parse error in '{String.intercalate " " toks}': {err}"
+    | .ok (expr, []) => .ok expr
+    | .ok (expr, restToks) =>
+      .error s!"unexpected input after {stringOfTestExpr expr}: {String.intercalate " " restToks}"
 
 /-! # Evaluator -/
 

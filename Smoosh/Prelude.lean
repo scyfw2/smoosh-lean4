@@ -371,6 +371,24 @@ def ShOpt.ofShortopt : Char → Option ShOpt
   | 'x' => some .xtrace
   | _ => none
 
+def ShOpt.ofLongopt : String → Option ShOpt
+  | "allexport"      => some .allexport
+  | "errexit"        => some .errexit
+  | "ignoreeof"      => some .ignoreeof
+  | "monitor"        => some .monitor
+  | "noclobber"      => some .noclobber
+  | "noglob"         => some .noglob
+  | "noexec"         => some .noexec
+  | "nolog"          => some .nolog
+  | "notify"         => some .notify
+  | "nounset"        => some .nounset
+  | "verbose"        => some .verbose
+  | "xtrace"         => some .xtrace
+  | "vi"             => some .vi
+  | "nonlexicalctrl" => some .nonlexicalctrl
+  | "interactive"    => some .interactive
+  | _                => none
+
 /-! # Modes and flags -/
 
 inductive SubstringMode where | shortest | longest
@@ -591,7 +609,9 @@ inductive Sym where
 
 inductive SymbolicChar where
   | c (ch : Char)
+  | q (ch : Char)
   | sym (s : Sym)
+  deriving Repr, BEq
 
 inductive ExpansionState where
   | expStart (opts : ExpansionOpts) (w : List Entry)
@@ -605,6 +625,8 @@ inductive ExpansionState where
 end
 
 deriving instance Repr for Format, Control, Entry, Stmt, Redir, ExpandingRedir, ExpandedRedir, ExpandedWord, TmpField, Sym, SymbolicChar, ExpansionState
+
+instance : Inhabited Stmt := ⟨.done⟩
 
 /-! # Step types — separate (smaller) mutual block -/
 -- These types reference Stmt but nothing in the core block references them.
@@ -677,6 +699,7 @@ abbrev ParseContext := Option DashString × Option Stackmark
 mutual
 def beqSymbolicChar : SymbolicChar → SymbolicChar → Bool
   | .c c1, .c c2 => c1 == c2
+  | .q c1, .q c2 => c1 == c2
   | _, _ => false  -- symbolic parts don't compare equal
 end
 
@@ -762,12 +785,18 @@ def joinPath (root ext : Path) : Path :=
 def symbolicStringOfString (s : String) : SymbolicString :=
   s.toList.map .c
 
+def quotedSymbolicStringOfString (s : String) : SymbolicString :=
+  s.toList.map .q
+
 def symbolicStringOfNat (n : Nat) : SymbolicString :=
   symbolicStringOfString (Nat.repr n)
 
 def tryConcrete : SymbolicString → Option String
   | [] => some ""
   | .c ch :: vs' => do
+    let cs ← tryConcrete vs'
+    some (String.ofList [ch] ++ cs)
+  | .q ch :: vs' => do
     let cs ← tryConcrete vs'
     some (String.ofList [ch] ++ cs)
   | .sym _ :: _ => none
@@ -846,7 +875,10 @@ def defaultShellState : ShellState :=
     exitCode := 0,
     lastPid := none,
     positionalParams := [symbolicStringOfString "smoosh"],
-    env := [("OPTIND", symbolicStringOfString "1")],
+    env := [("OPTIND", symbolicStringOfString "1"),
+            ("HOME", symbolicStringOfString "/home/user"),
+            ("IFS", symbolicStringOfString " \t\n"),
+            ("PWD", symbolicStringOfString "/")],
     locals := [],
     optoff := none,
     readonly := [],
@@ -868,6 +900,7 @@ def nullSym : Sym → Option Bool
 
 def nullChar : SymbolicChar → Option Bool
   | .c _ => some false
+  | .q _ => some false
   | .sym sym => nullSym sym
 
 def nullString : SymbolicString → Option Bool
@@ -906,11 +939,17 @@ def symbolicStringOfFields (fs : Fields) : SymbolicString :=
 def stringOfSymbolicString (ss : SymbolicString) : String :=
   match tryConcrete ss with
   | some s => s
-  | none => String.join (ss.filterMap fun c => match c with | .c ch => some (String.ofList [ch]) | _ => none)
+  | none => String.join (ss.filterMap fun
+    | .c ch => some (String.ofList [ch])
+    | .q ch => some (String.ofList [ch])
+    | _ => none)
 
 def maximalCharList : SymbolicString → List Char × SymbolicString
   | [] => ([], [])
   | .c ch :: rest =>
+    let (cs, remainder) := maximalCharList rest
+    (ch :: cs, remainder)
+  | .q ch :: rest =>
     let (cs, remainder) := maximalCharList rest
     (ch :: cs, remainder)
   | ss@(.sym _ :: _) => ([], ss)
@@ -918,7 +957,8 @@ def maximalCharList : SymbolicString → List Char × SymbolicString
 partial def wordsOfSymbolicString (ss : SymbolicString) : Words :=
   match ss with
   | [] => []
-  | .c _ :: _ =>
+  | .c _ :: _
+  | .q _ :: _ =>
     let (cs, remainder) := maximalCharList ss
     .s (String.ofList cs) :: wordsOfSymbolicString remainder
   | .sym sym :: rest => .esym sym :: wordsOfSymbolicString rest
@@ -931,7 +971,8 @@ def wordsOfFields : Fields → Words
 partial def expandedWordsOfSymbolicString (ss : SymbolicString) : ExpandedWords :=
   match ss with
   | [] => []
-  | .c _ :: _ =>
+  | .c _ :: _
+  | .q _ :: _ =>
     let (cs, remainder) := maximalCharList ss
     .expS (String.ofList cs) :: expandedWordsOfSymbolicString remainder
   | .sym sym :: rest => .ewSym sym :: expandedWordsOfSymbolicString rest
@@ -1010,7 +1051,9 @@ partial def symbolicStringOfExpandedWords (forPattern : Bool) : ExpandedWords �
     (if forPattern then ss.flatMap (escapeSc ['"']) else ss) ++
       symbolicStringOfExpandedWords forPattern ws
   | .dquo ss :: ws =>
-    (if forPattern then [.c '"'] ++ escapeQuotes ss ++ [.c '"'] else ss) ++
+    -- For pattern context: convert chars to .q (quoted/literal) so Lean's pattern parser
+    -- treats them as literals (OCaml wraps in "..." for its char-level parser instead)
+    (if forPattern then ss.map fun | .c ch => .q ch | x => x else ss) ++
       symbolicStringOfExpandedWords forPattern ws
   | .at_ fs :: ws =>
     symbolicStringOfFields fs ++ symbolicStringOfExpandedWords forPattern ws
@@ -1024,7 +1067,25 @@ def fieldsOfExpandedWords (w : ExpandedWords) : Fields :=
   [symbolicStringOfExpandedWords false w]
 
 def collapseQuoted (ew : ExpandedWords) : ExpandedWords :=
-  [.dquo (symbolicStringOfExpandedWords false ew)]
+  -- OCaml: break is_at w, then:
+  --   if no At: [DQuo (concat_expanded w)]
+  --   if At fs found: pre_w ++ intersperse UsrF (map DQuo fs) ++ post_w
+  let isAt : ExpandedWord → Bool
+    | .at_ _ => true
+    | _ => false
+  -- Split at the first At entry using span
+  let (preW, rest) := ew.span (fun e => !isAt e)
+  match rest with
+  | [] =>
+    -- No At entry: just collapse everything into a DQuo
+    [.dquo (symbolicStringOfExpandedWords false ew)]
+  | .at_ fs :: postW =>
+    -- Found At: attach pre_w to first field, intersperse DQuo fields with UsrF
+    let dquoFields := fs.map (fun ss => ExpandedWord.dquo ss)
+    let interspersed := dquoFields.intersperse .usrF
+    preW ++ interspersed ++ postW
+  | _ => -- shouldn't happen
+    [.dquo (symbolicStringOfExpandedWords false ew)]
 
 /-! # AST smart constructors -/
 

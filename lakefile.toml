@@ -14,3 +14,7 @@ name = "Smoosh"
 [[lean_exe]]
 name = "smoosh-test"
 root = "Main"
+
+[[lean_exe]]
+name = "debug-tracer"
+root = "Debug"

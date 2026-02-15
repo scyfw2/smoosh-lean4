@@ -60,39 +60,45 @@ def stringOfPattern (p : Pattern') : String :=
 
 /-! # Pattern parsing -/
 
-def parseBracketTerminator (pat : List Char) (term : Char) : Except String (List Char × List Char) :=
+def parseBracketTerminator (pat : SymbolicString) (term : Char) : Except String (SymbolicString × List Char) :=
   match pat with
   | [] => .error "expected bracket terminator, found end-of-pattern"
-  | c :: ']' :: pat' =>
+  | .c c :: .c ']' :: pat' =>
     if c == term then .ok (pat', [])
     else .error "expected terminator"
-  | c :: pat' => do
+  | .c c :: pat' => do
     let (pat'', cls) ← parseBracketTerminator pat' term
     .ok (pat'', c :: cls)
+  | .q c :: pat' => do
+    let (pat'', cls) ← parseBracketTerminator pat' term
+    .ok (pat'', c :: cls)
+  | .sym _ :: pat' => parseBracketTerminator pat' term -- Skip symbols?
 
-def parseBracketChar (pat : List Char) : Except String (List Char × BracketChar) :=
+def parseBracketChar (pat : SymbolicString) : Except String (SymbolicString × BracketChar) :=
   match pat with
   | [] => .error "expected bracket character, found end-of-pattern"
-  | '[' :: '.' :: pat' => do
+  | .c '[' :: .c '.' :: pat' => do
     let (pat'', cls) ← parseBracketTerminator pat' '.'
     .ok (pat'', .collating (String.ofList cls))
-  | '[' :: '=' :: pat' => do
+  | .c '[' :: .c '=' :: pat' => do
     let (pat'', cls) ← parseBracketTerminator pat' '='
     .ok (pat'', .equiv (String.ofList cls))
-  | '[' :: ':' :: pat' => do
+  | .c '[' :: .c ':' :: pat' => do
     let (pat'', cls) ← parseBracketTerminator pat' ':'
     .ok (pat'', .class_ (String.ofList cls))
-  | c :: pat' => .ok (pat', .char_ c)
+  | .c c :: pat' => .ok (pat', .char_ c)
+  | .q c :: pat' => .ok (pat', .char_ c)
+  | .sym _ :: pat' => parseBracketChar pat' -- Skip symbols
 
-partial def parseBracketEntries (pat : List Char) : Except String (List Char × List BracketEntry) :=
+partial def parseBracketEntries (pat : SymbolicString) : Except String (SymbolicString × List BracketEntry) :=
   match pat with
   | [] => .error "expected bracket entries, found end-of-pattern"
-  | ']' :: pat' => .ok (pat', [])
+  | .c ']' :: pat' => .ok (pat', [])
   | _ => do
     let (pat', bc) ← parseBracketChar pat
     match pat' with
-    | '-' :: ']' :: pat'' => .ok (']' :: pat'', [.bc (.char_ '-'), .bc bc])
-    | '-' :: pat'' => do
+    | .c '-' :: .c ']' :: pat'' => .ok (.c ']' :: pat'', [.bc (.char_ '-'), .bc bc])
+    | .c '-' :: pat'' => do
       let (pat''', bc2) ← parseBracketChar pat''
       let (pat'''', es) ← parseBracketEntries pat'''
       .ok (pat'''', .range bc bc2 :: es)
@@ -102,33 +108,59 @@ partial def parseBracketEntries (pat : List Char) : Except String (List Char × 
 
 def bracketInitialLiteral (c : Char) : Bool := c == ']' || c == '-'
 
-partial def parseBracket (pat : List Char) : Except String (List Char × PatternChar) :=
+partial def parseBracket (pat : SymbolicString) : Except String (SymbolicString × PatternChar) :=
   match pat with
   | [] => .error "unterminated bracket, found end-of-pattern"
-  | c :: pat' =>
+  | .c c :: pat' =>
     let (matching, pat'') :=
       if c == '!' then (false, pat')
       else (true, pat)
     let (realPat, frontEs) :=
-      match pat'' with
-      | c' :: rest' =>
+      (match pat'' with
+      | .c c' :: rest' =>
         if bracketInitialLiteral c' then (rest', [BracketEntry.bc (.char_ c')])
         else (pat'', [])
-      | _ => (pat'', [])
+      | .q c' :: rest' => (rest', [BracketEntry.bc (.char_ c')]) -- Quoted initial char is mostly just a char, except ] and - might be special if not quoted? Actually if quoted, they are definitely literals.
+      | _ => (pat'', []) : SymbolicString × List BracketEntry)
     match parseBracketEntries realPat with
     | .error err => .error err
     | .ok (restPat, es) => .ok (restPat, .bracket matching (frontEs ++ es))
+  | .q c :: pat' =>
+      -- Quoted [ is just literal [. But parseBracket is called only if [ was detected.
+      -- Wait, parseBracket is called from parsePatternLoop when it sees [.
+      -- If parsePatternLoop calls it, it already consumed [.
+      -- But here parseBracket logic seems to handle the content INSIDE [ ... ].
+      -- Ah, parsePatternLoop consumes '[', calls parseBracket with the rest.
+      -- The first char of parseBracket input is the first char *after* [.
+      -- So my match above on `.c c :: pat'` is handling `!`, `^` etc.
+      let (matching, pat'') := (true, pat) -- Quoted first char can't be ! or ^?
+      -- Actually, `[!...]` negation. If `!` is quoted, does it negate? `["!"]` -> matches `!`?
+      -- The standard says `!` or `^` as first char. Quote removes special meaning.
+      -- So if .q '!', it is NOT negation.
+      let (realPat, frontEs) : SymbolicString × List BracketEntry := (pat, []) -- No special negation, proceed to entries
+      -- But wait, what if the first char IS quoted ] or -?
+      -- `["-"]` -> matches -
+      match parseBracketEntries realPat with
+        | .error err => .error err
+        | .ok (restPat, es) => .ok (restPat, .bracket true es)
+  | .sym _ :: pat' => parseBracket pat'
 
-partial def parsePatternLoop (pat : List Char) : Except String (List Char × Pattern') :=
+partial def parsePatternLoop (pat : SymbolicString) : Except String (SymbolicString × Pattern') :=
   match pat with
   | [] => .ok ([], [])
-  | '*' :: pat' => do
+  | .c '*' :: pat' => do
     let (rest, pcs) ← parsePatternLoop pat'
     .ok (rest, .star :: pcs)
-  | '?' :: pat' => do
+  | .q '*' :: pat' => do
+    let (rest, pcs) ← parsePatternLoop pat'
+    .ok (rest, .lit '*' :: pcs)
+  | .c '?' :: pat' => do
     let (rest, pcs) ← parsePatternLoop pat'
     .ok (rest, .qmark :: pcs)
-  | '[' :: pat' =>
+  | .q '?' :: pat' => do
+    let (rest, pcs) ← parsePatternLoop pat'
+    .ok (rest, .lit '?' :: pcs)
+  | .c '[' :: pat' =>
     match parseBracket pat' with
     | .error _ => do
       -- treat '[' as literal
@@ -137,18 +169,28 @@ partial def parsePatternLoop (pat : List Char) : Except String (List Char × Pat
     | .ok (pat'', bc) => do
       let (rest, pcs) ← parsePatternLoop pat''
       .ok (rest, bc :: pcs)
-  | '\\' :: c :: pat' => do
+  | .q '[' :: pat' => do
+    let (rest, pcs) ← parsePatternLoop pat'
+    .ok (rest, .lit '[' :: pcs)
+  | .c '\\' :: .c c :: pat' => do
     let (rest, pcs) ← parsePatternLoop pat'
     .ok (rest, .lit c :: pcs)
-  | c :: pat' => do
+  | .c '\\' :: .q c :: pat' => do
     let (rest, pcs) ← parsePatternLoop pat'
     .ok (rest, .lit c :: pcs)
+  | .c c :: pat' => do
+    let (rest, pcs) ← parsePatternLoop pat'
+    .ok (rest, .lit c :: pcs)
+  | .q c :: pat' => do
+    let (rest, pcs) ← parsePatternLoop pat'
+    .ok (rest, .lit c :: pcs)
+  | .sym _ :: pat' => parsePatternLoop pat' -- Skip symbols
 
-def parsePattern (pat : List Char) : Except String Pattern' :=
+def parsePattern (pat : SymbolicString) : Except String Pattern' :=
   match parsePatternLoop pat with
   | .error err => .error err
   | .ok ([], pattern) => .ok pattern
-  | .ok (pat', _) => .error s!"unexpected unparsed pattern in '{String.ofList pat'}'"
+  | .ok (pat', _) => .error s!"unexpected unparsed pattern in '{stringOfSymbolicString pat'}'"
 
 /-! # Pattern matching -/
 
@@ -168,32 +210,45 @@ def matchEntry (lc : Locale) (c : Char) (be : BracketEntry) : Bool :=
     | _, _ => false
 
 partial def matchExactPattern (lc : Locale) (pat : Pattern') (s : SymbolicString) : MatchResult SymbolicString :=
-  match pat, s with
-  | [], [] => .match_ []
-  | [], _ => .noMatch
-  | .lit c :: pat', .c c' :: s' =>
-    if c == c' then matchExactPattern lc pat' s'
-    else .noMatch
-  | .qmark :: pat', .c _ :: s' => matchExactPattern lc pat' s'
-  | .bracket shouldMatch es :: pat', .c c :: s' =>
-    let matched := es.any (matchEntry lc c)
-    if matched == shouldMatch then matchExactPattern lc pat' s'
-    else .noMatch
-  | .star :: pat', _ => matchStar lc pat' s
-  | _, .sym _ :: _ => .symbolic
-  | _ :: _, [] => .noMatch
-where
-  matchStar (lc : Locale) (pat' : Pattern') : SymbolicString → MatchResult SymbolicString
+  let rec matchStar (lc : Locale) (pat' : Pattern') : SymbolicString → MatchResult SymbolicString
     | [] => matchExactPattern lc pat' []
     | ss@(.c _ :: s') =>
       match matchExactPattern lc pat' ss with
       | .match_ r => .match_ r
       | .symbolic => .symbolic
       | .noMatch => matchStar lc pat' s'
-    | ss@(.sym _ :: _) => .symbolic
+    | ss@(.q _ :: s') =>
+      match matchExactPattern lc pat' ss with
+      | .match_ r => .match_ r
+      | .symbolic => .symbolic
+      | .noMatch => matchStar lc pat' s'
+    | .sym _ :: _ => .symbolic
+
+  match pat, s with
+  | [], [] => .match_ []
+  | [], _ => .noMatch
+  | .lit c :: pat', .c c' :: s' =>
+    if c == c' then matchExactPattern lc pat' s'
+    else .noMatch
+  | .lit c :: pat', .q c' :: s' =>
+    if c == c' then matchExactPattern lc pat' s'
+    else .noMatch
+  | .qmark :: pat', .c _ :: s' => matchExactPattern lc pat' s'
+  | .qmark :: pat', .q _ :: s' => matchExactPattern lc pat' s'
+  | .bracket shouldMatch es :: pat', .c c :: s' =>
+    let matched := es.any (matchEntry lc c)
+    if matched == shouldMatch then matchExactPattern lc pat' s'
+    else .noMatch
+  | .bracket shouldMatch es :: pat', .q c :: s' =>
+    let matched := es.any (matchEntry lc c)
+    if matched == shouldMatch then matchExactPattern lc pat' s'
+    else .noMatch
+  | .star :: pat', _ => matchStar lc pat' s
+  | _, .sym _ :: _ => .symbolic
+  | _ :: _, [] => .noMatch
 
 def matchExact (lc : Locale) (pat s : SymbolicString) : MatchResult SymbolicString :=
-  match parsePattern (pat.filterMap (fun c => match c with | .c ch => some ch | .sym _ => none)) with
+  match parsePattern (pat.filter fun | .sym _ => false | _ => true) with
   | .error _ => .noMatch
   | .ok parsedPat => matchExactPattern lc parsedPat s
 

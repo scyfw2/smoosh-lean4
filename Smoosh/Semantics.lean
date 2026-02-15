@@ -17,7 +17,7 @@ inductive QuotingMode where | quoted | unquoted
 /-! # Trap management -/
 
 class Shell (α : Type) [OS α] where
-  runCommand : OsState α → CommandOpts → CheckingMode → SymbolicString → List SymbolicString → Env → List (Fd × Sum Fd Unit) → EvaluationStep × OsState α × Stmt
+  runCommand : OsState α → CommandOpts → CheckingMode → SymbolicString → List SymbolicString → Env → List (Fd × Sum Fd Unit) → Sum (OsState α × String) (OsState α × Stmt × Bool)
 
 section Semantics
 variable {α : Type} [OS α] [Shell α]
@@ -25,8 +25,8 @@ variable {α : Type} [OS α] [Shell α]
 /-- Check if a command name is a POSIX special builtin -/
 private def isSpecialBuiltinName (name : String) : Bool :=
   name ∈ ["break", ":", "continue", ".", "eval", "exec", "exit",
-           "export", "readonly", "return", "set", "shift", "times",
-           "trap", "unset"]
+           "export", "local", "readonly", "return", "set", "shift",
+           "source", "times", "trap", "unset"]
 
 /-- Check for pending signals and run trap handlers -/
 partial def internalCheckTraps (step : EvaluationStep) (s : OsState α) (c : Stmt)
@@ -45,8 +45,17 @@ partial def internalCheckTraps (step : EvaluationStep) (s : OsState α) (c : Stm
         -- Parse and execute the handler, then continue with c
         let step' := .xsTrap signal "trap handler"
         let c' := .trapped signal s1.sh.exitCode
-                    (.evalLoop 0 (none, none) (.parseString .parseTrap (String.join (ssHandler.filterMap (fun c => match c with | .c ch => some (String.ofList [ch]) | .sym _ => none)))) .noninteractive .subsidiary) c
+                    (.evalLoop 0 (none, none) (.parseString .parseTrap (String.join (ssHandler.filterMap (fun c => match c with | .c ch => some (String.ofList [ch]) | .q ch => some (String.ofList [ch]) | .sym _ => none)))) .noninteractive .subsidiary) c
         (step', s1, c')
+
+/-- Check traps wrapper — matches OCaml check_traps: skips Exit -/
+def checkTraps (res : EvaluationStep × OsState α × Stmt)
+    : EvaluationStep × OsState α × Stmt :=
+  match res with
+  | (_, _, .exit_) => res  -- don't check traps on Exit
+  | (step0, s0, c0) =>
+    let s1 := logTrace .traps "checked traps" s0
+    internalCheckTraps step0 s1 c0
 
 /-! # Expansion stepping -/
 
@@ -71,10 +80,20 @@ def expandParam (s0 : OsState α) (split : SplittingMode) (q : QuotingMode) (str
           | [] => []
           | c :: _ => [c]
       (s0, some [symbolicStringOfFieldsSep sep (getFunctionParams s0)])
+    else if str == "*" || str == "@"
+    then
+      -- Unquoted $* or $@: return positional params as fields
+      let params := getFunctionParams s0
+      if params.isEmpty then (s0, none)
+      else (s0, some params)
     else
       (s0, (lookupParam s0 str).map (fun ss => [ss]))
   let cstr (sv : String) := (s1, [ExpandedWord.expS sv], ([] : Words))
-  let ewfs (fs : Fields) := (s1, expandedWordsOfFields fs, ([] : Words))
+  let ewfs (fs : Fields) :=
+    if q == .quoted then
+      (s1, fs.map (fun ss => ExpandedWord.dquo (ss.map fun | .c c => .q c | x => x)), ([] : Words))
+    else
+      (s1, expandedWordsOfFields fs, ([] : Words))
   let wrds (w : Words) := (s1, ([] : ExpandedWords), w)
   let null_ := (s1, ([] : ExpandedWords), ([] : Words))
   let ctrl (k : Control) := (s1, ([] : ExpandedWords), [Entry.k k])
@@ -133,16 +152,36 @@ def expandParam (s0 : OsState α) (split : SplittingMode) (q : QuotingMode) (str
   | some fs, .substring side mode w => ctrl (.lmatch fs side mode [] w)
 
 /-- Try match and extract substring — stub for pattern matching -/
-def tryMatchSubstring (_lc : Locale) (side : SubstringSide) (mode : SubstringMode)
+def tryMatchSubstring (lc : Locale) (side : SubstringSide) (mode : SubstringMode)
     (pat str : SymbolicString) : SymbolicString :=
-  let matcherFn := match side, mode with
-    | .prefix_, .shortest => matchShortest _lc pat
-    | .prefix_, .longest  => matchLongest _lc pat
-    | .suffix_, .shortest => matchShortest _lc pat
-    | .suffix_, .longest  => matchLongest _lc pat
-  match matcherFn str with
-  | .match_ (_, remainder) => remainder
-  | _ => str
+  -- OCaml: parse the pattern, then try splitting the string at each position.
+  -- For prefix removal (#/##): match pattern against str[0..n], keep str[n..].
+  -- For suffix removal (%/%%): match pattern against str[n..], keep str[0..n].
+  -- Shortest/longest is controlled by the order we try the split sizes.
+  let parsedPat := parsePattern (pat.filter fun | .sym _ => false | _ => true)
+  match parsedPat with
+  | .error _ => str
+  | .ok pattern1 =>
+    let len := str.length
+    let sizes := List.range (len + 1)  -- [0, 1, ..., len]
+    let orderedSizes := match mode, side with
+      | .shortest, .prefix_ => sizes           -- try smallest prefix first
+      | .longest,  .suffix_ => sizes           -- try smallest kept portion first = largest suffix
+      | .longest,  .prefix_ => sizes.reverse   -- try largest prefix first
+      | .shortest, .suffix_ => sizes.reverse   -- try largest kept portion first = smallest suffix
+    let rec tryLoop : List Nat → SymbolicString
+      | [] => str  -- no match: return original
+      | size :: rest =>
+        let first := str.take size
+        let restStr := str.drop size
+        let (substr, keep) := match side with
+          | .prefix_ => (first, restStr)
+          | .suffix_ => (restStr, first)
+        match matchExactPattern lc pattern1 substr with
+        | .match_ _ => keep
+        | .symbolic => str  -- can't concretize: return original
+        | .noMatch => tryLoop rest
+    tryLoop orderedSizes
 
 -- Result types for expand_control / expand_words
 -- Left = error:  (step, os, expanded_words)
@@ -152,6 +191,12 @@ abbrev ExpCtrlResult (α : Type) :=
       (ExpansionStep × OsState α × ExpandedWords × Words)
 
 instance : Nonempty (ExpCtrlResult α) := ⟨Sum.inl (.esStep "", sorry, [])⟩
+
+def enterLoop (os : OsState α) : OsState α :=
+  { os with sh := { os.sh with loopNest := os.sh.loopNest + 1 } }
+
+def exitLoop (os : OsState α) : OsState α :=
+  { os with sh := { os.sh with loopNest := os.sh.loopNest - 1 } }
 
 mutual
 
@@ -222,9 +267,8 @@ partial def expandControl (stepFun : StepFun α) (s0 : OsState α) (split : Spli
   | .lmatch str side mode f [] =>
     let sympat := symbolicStringOfExpandedWords true f
     let symstr := symbolicStringOfFields str
-    let (s1, _, pat) := concretize s0 sympat
-    let matched := tryMatchSubstring s1.sh.locale side mode (symbolicStringOfString pat) symstr
-    Sum.inr (.esParam "finished match", s1, [], wordsOfSymbolicString matched)
+    let matched := tryMatchSubstring s0.sh.locale side mode sympat symstr
+    Sum.inr (.esParam "finished match", s0, [], wordsOfSymbolicString matched)
   | .lmatch str side mode f w =>
     match expandWords stepFun s0 .noSplit .unquoted .generatedString [] w with
     | Sum.inr (step, s1, f1, w1) =>
@@ -287,7 +331,7 @@ partial def expandControl (stepFun : StepFun α) (s0 : OsState α) (split : Spli
         | none => 0
         | some ss =>
           match tryConcrete ss with
-          | some s => match String.toInt? s with | some i => i | none => 0
+          | some s => match readSignedInteger 10 s.toList with | .ok i => i | .error _ => 0
           | none => 0
       let set (st : OsState α) (n : String) (v : Int) : Except String (OsState α) :=
         match setParam n (symbolicStringOfString (toString v)) st with
@@ -312,7 +356,7 @@ partial def expandControl (stepFun : StepFun α) (s0 : OsState α) (split : Spli
       Sum.inr (step, s1, [], [.k (.quote (f ++ f1) w1)])
     | Sum.inl err => Sum.inl err
   | .escape c =>
-    Sum.inr (.esEscape "", s0, [.dquo [.c c]], [])
+    Sum.inr (.esEscape "", s0, [.dquo [.q c]], [])
 
 /-- Expand a word list — translated from expand_words (semantics.lem:469-487) -/
 partial def expandWords (stepFun : StepFun α) (s0 : OsState α) (split : SplittingMode) (q : QuotingMode) (sm : StringMode)
@@ -322,7 +366,7 @@ partial def expandWords (stepFun : StepFun α) (s0 : OsState α) (split : Splitt
   | .s "" :: ws => expandWords stepFun s0 split q sm f ws
   | .s str :: ws =>
     let f1 := match q, sm with
-      | .quoted, _ => [ExpandedWord.dquo (symbolicStringOfString str)]
+      | .quoted, _ => [ExpandedWord.dquo (quotedSymbolicStringOfString str)]
       | .unquoted, .userString => [.usrS str]
       | .unquoted, .generatedString => [.expS str]
     Sum.inr (.esStep "plain string", s0, f ++ f1, ws)
@@ -406,12 +450,167 @@ def stepRedir (stepFun : StepFun α) (s : OsState α) : ExpandingRedir → Redir
 
 /-! # Evaluation stepping -/
 
+/-- Handle expansion errors — translated from expansion_error (semantics.ml:89-95) -/
+def expansionError (mayExit : Bool) (s0 : OsState α) (evalStep : EvaluationStep) (expStep : ExpansionStep) (err : Fields)
+    : EvaluationStep × OsState α × Stmt :=
+  let msg := stringOfSymbolicString (symbolicStringOfFields err)
+  let s1 := failWith msg s0
+  internalCheckTraps (.xsExpand evalStep expStep) s1
+    (if mayExit && isInteractive s1 then .done else .exit_)
+
 /-- Main evaluation stepper — this is the heart of the semantics -/
 instance : Nonempty (EvaluationStep × OsState α × Stmt) := ⟨sorry⟩
-partial def stepEval (s : OsState α) (c : Stmt)
+/-- Minimal shell string parser for trap handlers and eval strings.
+    Splits by ';' for semicolons, then by whitespace for words.
+    Handles simple commands like "echo bye; echo foo". -/
+def isValidVarNameChar (c : Char) : Bool :=
+  c.isAlpha || c.isDigit || c == '_'
+
+def isAssignment (w : String) : Option (String × String) :=
+  match w.splitOn "=" with
+  | [name, value] =>
+    if name.isEmpty then none
+    else if name.all isValidVarNameChar && (name.front.isAlpha || name.front == '_')
+    then some (name, value)
+    else none
+  | name :: value :: rest =>
+    -- handle VAR=val=ue (value can contain =)
+    if name.isEmpty then none
+    else if name.all isValidVarNameChar && (name.front.isAlpha || name.front == '_')
+    then some (name, "=".intercalate (value :: rest))
+    else none
+  | _ => none
+
+-- Parse a word that may contain $VAR, $?, $#, $$ references
+-- Returns a list of Entry (Words elements)
+private partial def parseTrapWordGo (cs : List Char) (acc : String) (result : Words) : Words :=
+  match cs with
+  | [] =>
+    if acc.isEmpty then result
+    else result ++ [.s acc]
+  | '$' :: '?' :: rest =>
+    let r := if acc.isEmpty then result else result ++ [.s acc]
+    parseTrapWordGo rest "" (r ++ [.k (.param "?" (.default_ []))])
+  | '$' :: '#' :: rest =>
+    let r := if acc.isEmpty then result else result ++ [.s acc]
+    parseTrapWordGo rest "" (r ++ [.k (.param "#" (.default_ []))])
+  | '$' :: '$' :: rest =>
+    let r := if acc.isEmpty then result else result ++ [.s acc]
+    parseTrapWordGo rest "" (r ++ [.k (.param "$" (.default_ []))])
+  | '$' :: c :: rest =>
+    if c.isDigit then
+      let r := if acc.isEmpty then result else result ++ [.s acc]
+      parseTrapWordGo rest "" (r ++ [.k (.param (String.ofList [c]) (.default_ []))])
+    else if c.isAlpha || c == '_' then
+      -- Read variable name
+      let (varChars, remaining) := rest.span (fun ch => ch.isAlpha || ch.isDigit || ch == '_')
+      let varName := String.ofList (c :: varChars)
+      let r := if acc.isEmpty then result else result ++ [.s acc]
+      parseTrapWordGo remaining "" (r ++ [.k (.param varName (.default_ []))])
+    else
+      parseTrapWordGo (c :: rest) (acc ++ "$") result
+  | c :: rest =>
+    parseTrapWordGo rest (acc.push c) result
+
+def parseTrapWord (w : String) : Words :=
+  parseTrapWordGo w.toList "" []
+
+-- Parse a list of words into a Stmt.command
+private def parseTrapCommandWords (trimmed : String) : Stmt :=
+  let words := trimmed.splitOn " " |>.filter (· != "")
+  match words with
+  | [] => .done
+  | [single] =>
+    match isAssignment single with
+    | some (name, value) =>
+      let rhs : Words := if value.isEmpty then [] else [.s value]
+      Stmt.command [(name, rhs)] [] [] defaultCmdOpts
+    | none =>
+      let entries := parseTrapWord single
+      Stmt.command [] entries [] defaultCmdOpts
+  | _ =>
+    -- Check for leading assignments
+    let (assigns, cmdWords) := words.span (fun w => isAssignment w |>.isSome)
+    if !assigns.isEmpty then
+      let assignList : List (String × Words) := assigns.filterMap fun w =>
+        match isAssignment w with
+        | some (name, value) =>
+          some (name, if value.isEmpty then [] else [.s value])
+        | none => none
+      if cmdWords.isEmpty then
+        Stmt.command assignList [] [] defaultCmdOpts
+      else
+        let cmdEntries : Words := cmdWords.foldl (fun acc w =>
+          let wordEntries := parseTrapWord w
+          match acc with
+          | [] => wordEntries
+          | _ => acc ++ [.f] ++ wordEntries) []
+        Stmt.command assignList cmdEntries [] defaultCmdOpts
+    else
+      -- Build entries with F separators, handling $var in each
+      let entries : Words := words.foldl (fun acc w =>
+        let wordEntries := parseTrapWord w
+        match acc with
+        | [] => wordEntries
+        | _ => acc ++ [.f] ++ wordEntries) []
+      Stmt.command [] entries [] defaultCmdOpts
+
+-- Parse a simple command string (no ; && ||)
+-- Handles subshell (cmd) and negation ! cmd (one level deep)
+def parseTrapSimpleCmd (s : String) : Stmt :=
+  let trimmed := s.trimAscii.toString
+  if trimmed.isEmpty then .done
+  -- Check for subshell: (cmd)
+  else if trimmed.front == '(' && trimmed.back == ')' then
+    let inner := ((trimmed.drop 1).dropEnd 1).toString
+    .subshell (parseTrapCommandWords inner) ([], none, [])
+  -- Check for negation: ! cmd
+  else if trimmed.startsWith "! " then
+    let rest := (trimmed.drop 2).trimAscii.toString
+    .not_ (parseTrapCommandWords rest)
+  else
+    parseTrapCommandWords trimmed
+
+def parseTrapString (s : String) : Stmt :=
+  -- Split by ';' to get individual statement groups
+  let semiParts := s.splitOn ";"
+  let stmts := semiParts.filterMap fun part =>
+    let trimmed := part.trimAscii.toString
+    if trimmed.isEmpty then none
+    else
+      -- Split by '&&' and '||' to get And/Or chains
+      -- Check for &&
+      match trimmed.splitOn " && " with
+      | [single] =>
+        -- No &&, check for ||
+        match single.splitOn " || " with
+        | [single2] => some (parseTrapSimpleCmd single2)
+        | first :: rest =>
+          let firstStmt := parseTrapSimpleCmd first
+          some (rest.foldl (fun acc part => .or_ acc (parseTrapSimpleCmd part)) firstStmt)
+        | [] => some .done
+      | first :: rest =>
+        let firstStmt := parseTrapSimpleCmd first
+        some (rest.foldl (fun acc part =>
+          -- Each part after && may contain ||
+          match part.splitOn " || " with
+          | [single2] => .and_ acc (parseTrapSimpleCmd single2)
+          | first2 :: rest2 =>
+            let andRight := parseTrapSimpleCmd first2
+            let orChain := rest2.foldl (fun a p => .or_ a (parseTrapSimpleCmd p)) andRight
+            .and_ acc orChain
+          | [] => acc) firstStmt)
+      | [] => some .done
+  -- Join with Semi
+  match stmts with
+  | [] => .done
+  | [c] => c
+  | c :: rest => rest.foldl (fun acc s => .semi acc s) c
+
+partial def stepEval (s : OsState α) (c : Stmt) (checked : CheckingMode := .unchecked)
     : EvaluationStep × OsState α × Stmt :=
   match c with
-  | .done => (.xsSimple "done", s, .done)
+  | .done => checkTraps (.xsSimple "done", s, .done)
 
   -- Command with args to expand
   | .command assigns args redirs opts =>
@@ -426,48 +625,72 @@ partial def stepEval (s : OsState α) (c : Stmt)
     match es' with
     | .expDone fs =>
       let rs := ([], none, redirs)
-      (.xsSimple "command-exp-redirs", s', .commandExpRedirs assigns fs rs opts)
+      (.xsExpand (.xsSimple "args fully expanded") step, s', .commandExpRedirs assigns fs rs opts)
+    | .expError err =>
+      expansionError true s' (.xsSimple "arg expansion") step err
     | _ =>
-      (.xsSimple "expanding", s', .commandExpArgs assigns es' redirs opts)
+      (.xsExpand (.xsSimple "argument expansion step") step, s', .commandExpArgs assigns es' redirs opts)
 
   -- Expanding redirects
-  | .commandExpRedirs assigns fs (ers, mxr, []) opts =>
-    match mxr with
-    | none =>
-      -- All redirects expanded — push local scope for assignments
-      let (s1, savedFds) := match (doRedirs s ers) with
-        | (s', .inr sf) => (s', sf)
-        | (s', .inl _) => (s', [])
-      let s2 := newLocalScope s1
-      (.xsSimple "command-ready", s2,
-       .commandExpAssign (assigns.map (fun (k, w) => (k, .expStart { splitting := .noSplit, globbing := false } w))) fs savedFds opts)
-    | some xr =>
-      match stepRedir (stepEval' s) s xr with
-      | .redirExpDone s' er =>
-        (.xsRedir "expanding", s', .commandExpRedirs assigns fs (ers ++ [er], none, []) opts)
-      | .redirExpStep step s' xr' =>
-        ((.xsExpand (.xsRedir "redirect") step), s', .commandExpRedirs assigns fs (ers, some xr', []) opts)
-      | .redirExpError msg =>
-        (.xsSimple "redir-error", failWith msg s, .done)
-  | .commandExpRedirs assigns fs (ers, mxr, r :: rs) opts =>
+  -- First, handle the case where a redirect is currently being expanded (mxr = some xr).
+  -- This MUST come before the (ers, mxr, r :: rs) pattern to avoid discarding in-progress expansions.
+  | .commandExpRedirs assigns fs (ers, some xr, rs) opts =>
+    match stepRedir (stepEval' s) s xr with
+    | .redirExpDone s' er =>
+      (.xsRedir "expanding", s', .commandExpRedirs assigns fs (ers ++ [er], none, rs) opts)
+    | .redirExpStep step s' xr' =>
+      let opts' := { opts with ranCmdSubst := opts.ranCmdSubst || ranCommandSubstitution step }
+      ((.xsExpand (.xsRedir "redirect") step), s', .commandExpRedirs assigns fs (ers, some xr', rs) opts')
+    | .redirExpError msg =>
+      -- Match OCaml: check if command is special builtin for error handling
+      let (s2, mayExit) := match fs with
+        | sProg :: _ =>
+          let (s2, _, prog) := concretize s sProg
+          (s2, isSpecialBuiltinName prog)
+        | _ => (s, false)
+      expansionError mayExit s2 (.xsSimple "error in redirect expansion") (.esStep "") [symbolicStringOfString msg]
+  -- Start expanding a new redirect from the remaining list
+  | .commandExpRedirs assigns fs (ers, none, r :: rs) opts =>
     let xr := match r with
       | .rfile ty fd w => ExpandingRedir.xrFile ty fd (.expStart { splitting := .noSplit, globbing := false } w)
       | .rdup ty fd w => ExpandingRedir.xrDup ty fd (.expStart { splitting := .noSplit, globbing := false } w)
       | .rheredoc ty fd w => ExpandingRedir.xrHeredoc ty fd (.expStart { splitting := .noSplit, globbing := false } w)
     (.xsRedir "starting", s, .commandExpRedirs assigns fs (ers, some xr, rs) opts)
+  -- All redirects fully expanded and no more to process
+  | .commandExpRedirs assigns fs (ers, none, []) opts =>
+    -- All redirects expanded — match OCaml semantics.ml:716-753
+    -- Determine if command is a special builtin (for error handling)
+    let (s1, progSpecial) := match fs with
+      | sProg :: _ =>
+        let (s1, _, progName) := concretize s sProg
+        (s1, isSpecialBuiltinName progName)
+      | _ => (s, false)
+    let catchingErrors := s1.sh.opts.any (· == .errexit)
+    let exitOnError := catchingErrors ||
+      (progSpecial && !opts.forceSimpleCommand && !isInteractive s1)
+    match doRedirs s1 ers with
+    | (s2, .inl msg) =>
+      internalCheckTraps (.xsSimple ("error in redirection: " ++ msg)) (failWith msg s2)
+        (if exitOnError then .exit_ else .done)
+    | (s2, .inr savedFds) =>
+      let expAssigns := assigns.map (fun (k, w) =>
+        (k, ExpansionState.expStart { splitting := .noSplit, globbing := false } w))
+      let s3 := newLocalScope s2
+      (.xsSimple "redirected; expanding assignments", s3,
+       .commandExpAssign expAssigns fs savedFds opts)
 
   -- Semi (sequencing)
   | .semi s1 s2 =>
     match s1 with
-    | .done => (.xsSemi "next", s, s2)
+    | .done => checkTraps (.xsSemi "next", s, s2)
     | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
     | .return_ => (.xsSimple "propagate-return", s, .return_)
     | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
     | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
-      let (step, s', c') := stepEval s s1
+      let (step, s', c') := stepEval s s1 checked
       match c' with
-      | .done => (.xsNested (.xsSemi "done LHS") step, s', s2)
+      | .done => checkTraps (.xsNested (.xsSemi "done LHS") step, s', s2)
       | .exit_ => (.xsNested (.xsSemi "propagate-exit") step, s', .exit_)
       | .return_ => (.xsNested (.xsSemi "propagate-return") step, s', .return_)
       | .break_ n => (.xsNested (.xsSemi "propagate-break") step, s', .break_ n)
@@ -478,18 +701,18 @@ partial def stepEval (s : OsState α) (c : Stmt)
   | .and_ s1 s2 =>
     match s1 with
     | .done =>
-      if s.sh.exitCode == 0 then (.xsAnd "success-continue", s, s2)
-      else (.xsAnd "fail-skip", s, .done)
+      if s.sh.exitCode == 0 then checkTraps (.xsAnd "success-continue", s, s2)
+      else checkTraps (.xsAnd "fail-skip", s, .done)
     | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
     | .return_ => (.xsSimple "propagate-return", s, .return_)
     | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
     | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
-      let (step, s', c') := stepEval s s1
+      let (step, s', c') := stepEval s s1 .checked
       match c' with
       | .done =>
-        if s'.sh.exitCode == 0 then (.xsNested (.xsAnd "success-continue") step, s', s2)
-        else (.xsNested (.xsAnd "fail-skip") step, s', .done)
+        if s'.sh.exitCode == 0 then checkTraps (.xsNested (.xsAnd "success-continue") step, s', s2)
+        else checkTraps (.xsNested (.xsAnd "fail-skip") step, s', .done)
       | .exit_ => (.xsNested (.xsAnd "propagate-exit") step, s', .exit_)
       | .return_ => (.xsNested (.xsAnd "propagate-return") step, s', .return_)
       | .break_ n => (.xsNested (.xsAnd "propagate-break") step, s', .break_ n)
@@ -500,18 +723,18 @@ partial def stepEval (s : OsState α) (c : Stmt)
   | .or_ s1 s2 =>
     match s1 with
     | .done =>
-      if s.sh.exitCode != 0 then (.xsOr "fail-continue", s, s2)
-      else (.xsOr "success-skip", s, .done)
+      if s.sh.exitCode != 0 then checkTraps (.xsOr "fail-continue", s, s2)
+      else checkTraps (.xsOr "success-skip", s, .done)
     | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
     | .return_ => (.xsSimple "propagate-return", s, .return_)
     | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
     | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
-      let (step, s', c') := stepEval s s1
+      let (step, s', c') := stepEval s s1 .checked
       match c' with
       | .done =>
-        if s'.sh.exitCode != 0 then (.xsNested (.xsOr "fail-continue") step, s', s2)
-        else (.xsNested (.xsOr "success-skip") step, s', .done)
+        if s'.sh.exitCode != 0 then checkTraps (.xsNested (.xsOr "fail-continue") step, s', s2)
+        else checkTraps (.xsNested (.xsOr "success-skip") step, s', .done)
       | .exit_ => (.xsNested (.xsOr "propagate-exit") step, s', .exit_)
       | .return_ => (.xsNested (.xsOr "propagate-return") step, s', .return_)
       | .break_ n => (.xsNested (.xsOr "propagate-break") step, s', .break_ n)
@@ -523,17 +746,17 @@ partial def stepEval (s : OsState α) (c : Stmt)
     match s1 with
     | .done =>
       let ec := if s.sh.exitCode == 0 then 1 else 0
-      (.xsNot "negate", exitWith ec s, .done)
+      checkTraps (.xsNot "negate", exitWith ec s, .done)
     | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
     | .return_ => (.xsSimple "propagate-return", s, .return_)
     | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
     | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
-      let (step, s', c') := stepEval s s1
+      let (step, s', c') := stepEval s s1 .checked
       match c' with
       | .done =>
         let ec := if s'.sh.exitCode == 0 then 1 else 0
-        (.xsNested (.xsNot "negate") step, exitWith ec s', .done)
+        checkTraps (.xsNested (.xsNot "negate") step, exitWith ec s', .done)
       | .exit_ => (.xsNested (.xsNot "propagate-exit") step, s', .exit_)
       | .return_ => (.xsNested (.xsNot "propagate-return") step, s', .return_)
       | .break_ n => (.xsNested (.xsNot "propagate-break") step, s', .break_ n)
@@ -551,7 +774,7 @@ partial def stepEval (s : OsState α) (c : Stmt)
     | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
     | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
     | _ =>
-      let (step, s', c') := stepEval s cond
+      let (step, s', c') := stepEval s cond .checked
       match c' with
       | .done =>
         if s'.sh.exitCode == 0 then (.xsNested (.xsIf "then") step, s', then_)
@@ -564,64 +787,45 @@ partial def stepEval (s : OsState α) (c : Stmt)
 
   -- While condition
   | .while_ cond body =>
-    let s' := { s with sh := { s.sh with loopNest := s.sh.loopNest + 1 } }
-    (.xsWhile "enter", s', .whileCond cond cond body none)
+    (.xsWhile "enter", enterLoop s, .whileCond cond cond body none)
 
-  | .whileCond origCond curCond origBody _savedEc =>
-    match curCond with
+  | .whileCond origCond curCond origBody savedEc =>
+    let (step, s1, cur') := stepEval s curCond .checked
+    match cur' with
+    | .exit_ => (.xsNested (.xsWhile "exiting") step, s1, .exit_)
+    | .return_ => (.xsNested (.xsWhile "returning") step, s1, .return_)
+    | .break_ 1 => (.xsNested (.xsWhile "breaking") step, exitLoop s1, .done)
+    | .break_ n => (.xsNested (.xsWhile "breaking to outer loop") step,
+                     exitLoop s1, .break_ (n - 1))
+    | .continue_ 1 => (.xsNested (.xsWhile "continuing loop") step,
+                         s1, .whileCond origCond origCond origBody savedEc)
+    | .continue_ n => (.xsNested (.xsWhile "continuing to outer loop") step,
+                         exitLoop s1, .continue_ (n - 1))
     | .done =>
-      if s.sh.exitCode == 0 then (.xsWhile "body", s, .whileRunning origCond origBody origBody)
-      else
-        let ec := match _savedEc with | some ec => ec | none => 0
-        (.xsWhile "exit", exitWith ec { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .done)
-    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
-    | .return_ => (.xsSimple "propagate-return", s, .return_)
-    | .break_ n => (.xsSimple "propagate-break", s, .break_ n)
-    | .continue_ n => (.xsSimple "propagate-continue", s, .continue_ n)
-    | _ =>
-      let (step, s', c') := stepEval s curCond
-      match c' with
-      | .done =>
-        if s'.sh.exitCode == 0 then (.xsNested (.xsWhile "body") step, s', .whileRunning origCond origBody origBody)
-        else
-          let ec := match _savedEc with | some ec => ec | none => 0
-          (.xsNested (.xsWhile "exit") step, exitWith ec { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
-      | .exit_ => (.xsNested (.xsWhile "propagate-exit") step, s', .exit_)
-      | .return_ => (.xsNested (.xsWhile "propagate-return") step, s', .return_)
-      | .break_ n => (.xsNested (.xsWhile "propagate-break") step, s', .break_ n)
-      | .continue_ n => (.xsNested (.xsWhile "propagate-continue") step, s', .continue_ n)
-      | _ => (.xsNested (.xsWhile "cond") step, s', .whileCond origCond c' origBody _savedEc)
+      checkTraps
+        (if s1.sh.exitCode == 0
+         then (.xsNested (.xsWhile "exit code was 0, running the loop body") step,
+               s1, .whileRunning origCond origBody origBody)
+         else
+           let ec := match savedEc with | some ec => ec | none => 0
+           (.xsNested (.xsWhile "exit code was non-zero, exiting loop") step,
+            exitWith ec (exitLoop s1), .done))
+    | _ => (.xsNested (.xsWhile "") step, s1, .whileCond origCond cur' origBody savedEc)
 
   | .whileRunning origCond origBody curBody =>
-    match curBody with
-    | .done => (.xsWhile "loop", s, .whileCond origCond origCond origBody (some s.sh.exitCode))
-    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
-    | .return_ => (.xsSimple "propagate-return", s, .return_)
-    | .break_ n =>
-      if n ≤ 1 then
-        -- Break loop: decrement loopNest and exit
-        (.xsWhile "break-loop", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .done)
-      else
-        (.xsWhile "propagate-break", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .break_ (n - 1))
-    | .continue_ n =>
-      if n ≤ 1 then
-        -- Continue loop: next iteration (condition)
-        (.xsWhile "continue-loop", s, .whileCond origCond origCond origBody (some s.sh.exitCode))
-      else
-        (.xsWhile "propagate-continue", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .continue_ (n - 1))
-    | _ =>
-      let (step, s', c') := stepEval s curBody
-      match c' with
-      | .done => (.xsNested (.xsWhile "loop") step, s', .whileCond origCond origCond origBody (some s'.sh.exitCode))
-      | .exit_ => (.xsNested (.xsWhile "propagate-exit") step, s', .exit_)
-      | .return_ => (.xsNested (.xsWhile "propagate-return") step, s', .return_)
-      | .break_ n =>
-        if n ≤ 1 then (.xsNested (.xsWhile "break-loop") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
-        else (.xsNested (.xsWhile "propagate-break") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .break_ (n - 1))
-      | .continue_ n =>
-        if n ≤ 1 then (.xsNested (.xsWhile "continue-loop") step, s', .whileCond origCond origCond origBody (some s'.sh.exitCode))
-        else (.xsNested (.xsWhile "propagate-continue") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .continue_ (n - 1))
-      | _ => (.xsNested (.xsWhile "body-step") step, s', .whileRunning origCond origBody c')
+    let (step, s1, cur') := stepEval s curBody checked
+    match cur' with
+    | .exit_ => (.xsNested (.xsWhile "exiting") step, s1, .exit_)
+    | .return_ => (.xsNested (.xsWhile "returning") step, s1, .return_)
+    | .break_ 1 => (.xsNested (.xsWhile "breaking loop") step, exitLoop s1, .done)
+    | .break_ n => (.xsNested (.xsWhile "breaking to outer loop") step, exitLoop s1, .break_ (n - 1))
+    | .continue_ 1 => (.xsNested (.xsWhile "continuing loop") step,
+                         s1, .whileCond origCond origCond origBody (some s1.sh.exitCode))
+    | .continue_ n => (.xsNested (.xsWhile "continuing to outer loop") step, exitLoop s1, .continue_ (n - 1))
+    | .done => checkTraps
+        (.xsNested (.xsWhile "finished iteration, retesting condition") step,
+         s1, .whileCond origCond origCond origBody (some s1.sh.exitCode))
+    | _ => (.xsNested (.xsWhile "") step, s1, .whileRunning origCond origBody cur')
 
   -- For
   | .for_ var words body =>
@@ -634,132 +838,131 @@ partial def stepEval (s : OsState α) (c : Stmt)
     | _ => (.xsFor "expanding", s', .forExpArgs var es' body)
 
   | .forExpanded var fs body =>
-    let s' := { s with sh := { s.sh with loopNest := s.sh.loopNest + 1 } }
     match fs with
-    | [] => (.xsFor "empty", { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
+    | [] => checkTraps (.xsFor "no items, exit code is 0", exitWith 0 s, .done)
     | val :: fs' =>
-      let s'' := internalSetParam var val s'
-      (.xsFor "start", s'', .forRunning var fs' body body)
+      match setParam var val s with
+      | .inr s1 =>
+        (.xsFor "start", enterLoop s1, .forRunning var fs' body body)
+      | .inl err =>
+        (.xsFor err, failWith ("for: " ++ err) s,
+         if isInteractive s then .done else .exit_)
 
   | .forRunning var fs origBody curBody =>
-    match curBody with
+    -- Helper: advance to next iteration
+    let continueLoop (s0 : OsState α) (step : EvaluationStep) (msg : String) (i : SymbolicString) (f' : Fields) :=
+      match setParam var i s0 with
+      | .inl err =>
+        (.xsNested (.xsFor err) step,
+         failWith ("for: " ++ err) s0,
+         if isInteractive s0 then .done else .exit_)
+      | .inr s1 =>
+        (.xsNested (.xsFor (msg ++ " to next iteration")) step,
+         s1, .forRunning var f' origBody origBody)
+    let (step, s1, cur') := stepEval s curBody checked
+    match cur' with
+    | .exit_ => (.xsNested (.xsFor "exiting") step, s1, .exit_)
+    | .return_ => (.xsNested (.xsFor "returning") step, s1, .return_)
+    | .break_ 1 => (.xsNested (.xsFor "breaking loop") step, exitLoop s1, .done)
+    | .break_ n => (.xsNested (.xsFor "breaking to outer loop") step, exitLoop s1, .break_ (n - 1))
+    | .continue_ 1 =>
+      match fs with
+      | [] => (.xsNested (.xsFor "continued at last iteration") step, exitLoop s1, .done)
+      | i :: f' => continueLoop s1 step "continuing" i f'
+    | .continue_ n => (.xsNested (.xsFor "continuing to outer loop") step, s1, .continue_ (n - 1))
     | .done =>
-      match fs with
-      | [] =>
-        let s' := { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }
-        (.xsFor "done", s', .done)
-      | val :: fs' =>
-        let s' := internalSetParam var val s
-        (.xsFor "next", s', .forRunning var fs' origBody origBody)
-    | .exit_ => (.xsSimple "propagate-exit", s, .exit_)
-    | .return_ => (.xsSimple "propagate-return", s, .return_)
-    | .break_ n =>
-      if n ≤ 1 then (.xsFor "break-loop", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .done)
-      else (.xsFor "propagate-break", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .break_ (n - 1))
-    | .continue_ n =>
-      if n ≤ 1 then
-        match fs with
-        | [] => (.xsFor "continue-done", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .done)
-        | val :: fs' =>
-          let s' := internalSetParam var val s
-          (.xsFor "continue-next", s', .forRunning var fs' origBody origBody)
-      else
-        (.xsFor "propagate-continue", { s with sh := { s.sh with loopNest := s.sh.loopNest - 1 } }, .continue_ (n - 1))
-    | _ =>
-      match fs with
-      | [] =>
-        let (step, s', c') := stepEval s curBody
-        match c' with
-        | .done =>
-          -- Should effectively be done (loop empty)
-           (.xsNested (.xsFor "body-done") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done) -- Weird case if fs empty but body running?
-        | .exit_ => (.xsNested (.xsFor "propagate-exit") step, s', .exit_)
-        | .return_ => (.xsNested (.xsFor "propagate-return") step, s', .return_)
-        | .break_ n =>
-           if n ≤ 1 then (.xsNested (.xsFor "break-loop") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
-           else (.xsNested (.xsFor "propagate-break") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .break_ (n - 1))
-        | .continue_ n =>
-           if n ≤ 1 then (.xsNested (.xsFor "continue-done") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
-           else (.xsNested (.xsFor "propagate-continue") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .continue_ (n - 1))
-        | _ => (.xsNested (.xsFor "body") step, s', .forRunning var [] origBody c')
-      | val :: fs' =>
-        -- First iteration: set var and start body (wait, this logic was only for init? No, it's for `curBody` advancement)
-        -- If `fs` is present, it means we are in the middle of iterations.
-        -- But `curBody` is the active statement. `fs` is the REMAINING items.
-        -- Wait, the original logic had `match fs` inside `_` case.
-        -- `curBody` is the *current* execution. `fs` is the *future* items.
-        -- If `curBody` steps, we keep `fs`.
-        let (step, s', c') := stepEval s curBody
-        match c' with
-        | .done =>
-           -- Current iteration finished. Move to next.
-           match fs with
-           | [] => (.xsNested (.xsFor "loop-finish") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
-           | val' :: fs'' =>
-             let s'' := internalSetParam var val' s'
-             (.xsNested (.xsFor "loop-next") step, s'', .forRunning var fs'' origBody origBody)
-        | .exit_ => (.xsNested (.xsFor "propagate-exit") step, s', .exit_)
-        | .return_ => (.xsNested (.xsFor "propagate-return") step, s', .return_)
-        | .break_ n =>
-           if n ≤ 1 then (.xsNested (.xsFor "break-loop") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
-           else (.xsNested (.xsFor "propagate-break") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .break_ (n - 1))
-        | .continue_ n =>
-           if n ≤ 1 then
-             match fs with
-             | [] => (.xsNested (.xsFor "continue-finish") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .done)
-             | val' :: fs'' =>
-               let s'' := internalSetParam var val' s'
-               (.xsNested (.xsFor "continue-next") step, s'', .forRunning var fs'' origBody origBody)
-           else (.xsNested (.xsFor "propagate-continue") step, { s' with sh := { s'.sh with loopNest := s'.sh.loopNest - 1 } }, .continue_ (n - 1))
-        | _ => (.xsNested (.xsFor "body") step, s', .forRunning var (val :: fs') origBody c')
+      checkTraps
+        (match fs with
+         | [] => (.xsNested (.xsFor "finished last iteration") step, exitLoop s1, .done)
+         | i :: f' => continueLoop s1 step "stepping" i f')
+    | _ => (.xsNested (.xsFor "") step, s1, .forRunning var fs origBody cur')
 
-  -- Case
   | .case_ w cases =>
     (.xsCase "expand", s, .caseExpArg (.expStart { splitting := .noSplit, globbing := false } w) cases)
 
   | .caseExpArg es cases =>
     let (step, s', es') := stepExpansion (stepEval' s) s es
     match es' with
+    | .expExpand _opts f0 [] =>
+      let ss := symbolicStringOfExpandedWords true f0
+      (.xsCase "match", s', .caseMatch ss cases)
     | .expDone fs =>
+      -- Fallback (should be unreachable if we catch expExpand)
       let ss := fs.flatMap id
       (.xsCase "match", s', .caseMatch ss cases)
     | _ => (.xsCase "expanding", s', .caseExpArg es' cases)
 
-  | .caseMatch _ss [] => (.xsCase "no-match", s, .done)
+  | .caseMatch _ss [] => checkTraps (.xsCase "no-match", exitWith 0 s, .done)
   | .caseMatch ss ((pats, body) :: rest) =>
     match pats with
     | [] => (.xsCase "next-case", s, .caseMatch ss rest)
-    | pat :: _pats' =>
+    | pat :: pats' =>
       let es := ExpansionState.expStart { splitting := .noSplit, globbing := false } pat
-      (.xsCase "testing", s, .caseCheckMatch ss es body rest)
+      (.xsCase "testing", s, .caseCheckMatch ss es body ((pats', body) :: rest))
 
   | .caseCheckMatch ss es body rest =>
     let (_step, s', es') := stepExpansion (stepEval' s) s es
     match es' with
+    | .expExpand _opts f0 [] =>
+      let pat := symbolicStringOfExpandedWords true f0
+      match matchExact s'.sh.locale pat ss with
+      | .match_ _ => checkTraps (.xsCase "matched", s', body)
+      | .symbolic => (.xsCase "symbolic-match", s', .caseCheckMatch ss es body rest) -- Should not happen in concrete
+      | .noMatch =>
+        -- Try remaining patterns in this case
+        match rest with
+        | (pats', _body') :: rest' =>
+          (.xsCase "no-match-pat", s', .caseMatch ss ((pats', body) :: rest'))
+        | [] => (.xsCase "no-match-pat", s', .caseMatch ss [])
     | .expDone fs =>
       let pat := fs.flatMap id
       match matchExact s'.sh.locale pat ss with
-      | .match_ _ => (.xsCase "matched", s', body)
-      | _ => (.xsCase "no-match", s', .caseMatch ss rest)
+      | .match_ _ => checkTraps (.xsCase "matched", s', body)
+      | .symbolic => (.xsCase "symbolic-match", s', .caseCheckMatch ss es body rest)
+      | .noMatch =>
+        match rest with
+        | (pats', _body') :: rest' =>
+          (.xsCase "no-match-pat", s', .caseMatch ss ((pats', body) :: rest'))
+        | [] => (.xsCase "no-match-pat", s', .caseMatch ss [])
+
     | _ => (.xsCase "expanding-pat", s', .caseCheckMatch ss es' body rest)
 
   -- Defun
   | .defun name body =>
     let s' := { s with sh := { s.sh with funcs := (name, body) :: s.sh.funcs.filter (fun (n, _) => n != name) } }
-    (.xsDefun "define", exitWith 0 s', .done)
+    checkTraps (.xsDefun "define", exitWith 0 s', .done)
 
   -- Call (function invocation)
-  | .call outerLoopNest outerParams funcName origBody curBody =>
+  | .call outerLoopNest outerParams funcName _origBody curBody =>
+    let cleanup (os : OsState α) : OsState α :=
+      let (os', _) := popLocals os
+      setFunctionParams outerLoopNest outerParams os'
     match curBody with
     | .done =>
-      let s' := { s with sh := { s.sh with loopNest := outerLoopNest, positionalParams := outerParams } }
-      (.xsStack funcName (.xsSimple "return"), s', .done)
+      checkTraps (.xsStack funcName (.xsSimple "implicit return"), cleanup s, .done)
     | .return_ =>
-      let s' := { s with sh := { s.sh with loopNest := outerLoopNest, positionalParams := outerParams } }
-      (.xsStack funcName (.xsSimple "return"), s', .done)
+      checkTraps (.xsStack funcName (.xsSimple "explicit return"), cleanup s, .done)
+    | .exit_ =>
+      (.xsStack funcName (.xsSimple "exit"), cleanup s, .exit_)
+    | .break_ n =>
+      (.xsStack funcName (.xsSimple "break"), cleanup s, .break_ n)
+    | .continue_ n =>
+      (.xsStack funcName (.xsSimple "continue"), cleanup s, .continue_ n)
     | _ =>
-      let (step, s', c') := stepEval s curBody
-      (.xsStack funcName step, s', .call outerLoopNest outerParams funcName origBody c')
+      let (step, s', c') := stepEval s curBody checked
+      match c' with
+      | .done =>
+        (.xsStack (funcName ++ ": implicit return") step, cleanup s', .done)
+      | .return_ =>
+        (.xsStack (funcName ++ ": explicit return") step, cleanup s', .done)
+      | .exit_ =>
+        (.xsStack (funcName ++ ": exit") step, cleanup s', .exit_)
+      | .break_ n =>
+        (.xsStack (funcName ++ ": break") step, cleanup s', .break_ n)
+      | .continue_ n =>
+        (.xsStack (funcName ++ ": continue") step, cleanup s', .continue_ n)
+      | _ =>
+        (.xsStack funcName step, s', .call outerLoopNest outerParams funcName _origBody c')
 
   -- Pipe
   | .pipe bgMode cmds =>
@@ -834,10 +1037,12 @@ partial def stepEval (s : OsState α) (c : Stmt)
     | (s1, .inl msg) =>
       (.xsSubshell "error in redirection", failWith msg s1, .done)
     | (s1, .inr savedFds) =>
-      let (s2, pid) := OS.osForkAndSubshell s1 stmt' .fg none true
+      -- OCaml: let checked_c = (if checked_exit checked then CheckedExit stmt' else stmt') in
+      let checkedStmt := if checked.checkedExit then .checkedExit stmt' else stmt'
+      let (s2, pid) := OS.osForkAndSubshell s1 checkedStmt .fg none true
       (.xsSubshell s!"started subshell with pid {pid}",
        restoreFds s2 savedFds,
-       .wait pid .unchecked none .waitInternal)
+       .wait pid checked none .waitInternal)
 
   -- Subshell: expanding redirects
   | .subshell stmt' (ers, none, r :: rs) =>
@@ -856,20 +1061,23 @@ partial def stepEval (s : OsState α) (c : Stmt)
     | .redirExpError msg =>
       (.xsSubshell "error in redirect expansion", failWith msg s, .done)
 
-  -- Break / continue
-  | .break_ n =>
-    if n ≤ 1 then (.xsSimple "break", s, .done)
-    else (.xsSimple "break-outer", s, .break_ (n - 1))
+  -- Break / continue — OCaml: bottom out to Done with check_traps
+  | .break_ _n => checkTraps (.xsSimple "break bottomed out", s, .done)
 
-  | .continue_ n =>
-    if n ≤ 1 then (.xsSimple "continue", s, .done)
-    else (.xsSimple "continue-outer", s, .continue_ (n - 1))
+  | .continue_ _n => checkTraps (.xsSimple "continue bottomed out", s, .done)
 
-  -- Return
-  | .return_ => (.xsSimple "return", s, .done)
+  -- Return — OCaml: bottom out to Done with check_traps
+  | .return_ => checkTraps (.xsSimple "return bottomed out", s, .done)
 
-  -- Exit
-  | .exit_ => (.xsSimple "exit", s, .done)
+  -- Exit — OCaml: run exit_trap, then exit
+  | .exit_ =>
+    let (s', trapOpt) := exitTrap s
+    match trapOpt with
+    | none => (.xsSimple "exited", OS.osExit s', .done)
+    | some handler =>
+      let sHandler := stringOfSymbolicString handler
+      let cmd := Stmt.evalLoop 1 (none, none) (.parseString .parseTrap sHandler) .noninteractive .subsidiary
+      (.xsSimple "trapped on exit", s', .semi cmd .exit_)
 
   -- Wait
   | .wait pid check _steps _mode =>
@@ -884,64 +1092,93 @@ partial def stepEval (s : OsState α) (c : Stmt)
     match handler with
     | .done =>
       (.xsTrap signal "done", exitWith ec s, cont)
+    | .exit_ => (.xsTrap signal "propagate-exit", s, .exit_)
+    | .return_ => (.xsTrap signal "propagate-return", s, .return_)
+    | .break_ n => (.xsTrap signal "propagate-break", s, .break_ n)
+    | .continue_ n => (.xsTrap signal "propagate-continue", s, .continue_ n)
     | _ =>
-      let (_step, s', c') := stepEval s handler
-      (.xsTrap signal "handler", s', .trapped signal ec c' cont)
+      let (_step, s', c') := stepEval s handler .unchecked
+      match c' with
+      | .done => checkTraps (.xsNested (.xsTrap signal "handler-done") _step, s', .trapped signal ec .done cont)
+      | .exit_ => (.xsNested (.xsTrap signal "propagate-exit") _step, s', .exit_)
+      | .return_ => (.xsNested (.xsTrap signal "propagate-return") _step, s', .return_)
+      | .break_ n => (.xsNested (.xsTrap signal "propagate-break") _step, s', .break_ n)
+      | .continue_ n => (.xsNested (.xsTrap signal "propagate-continue") _step, s', .continue_ n)
+      | _ => (.xsTrap signal "handler", s', .trapped signal ec c' cont)
 
-  -- Checked exit
+  -- Checked exit — OCaml: uses is_terminating_control, not just .done
   | .checkedExit stmt =>
-    match stmt with
-    | .done =>
-      if s.sh.exitCode != 0 && s.sh.opts.any (· == .errexit) then
-        (.xsSimple "errexit", s, .exit_)
-      else
-        (.xsSimple "checked-done", s, .done)
-    | _ =>
-      let (_step, s', c') := stepEval s stmt
-      (.xsSimple "checking", s', .checkedExit c')
+    if isTerminatingControl stmt then
+      checkTraps (.xsSubshell "", s, stmt)
+    else
+      let (_step, s', c') := stepEval s stmt .checked
+      (.xsNested (.xsSubshell "disable errexit") _step, s', .checkedExit c')
 
-  -- Pushredir
+  -- Pushredir — OCaml: uses is_terminating_control, not just .done
   | .pushredir stmt saved =>
-    match stmt with
-    | .done =>
-      let s' := restoreFds s saved
-      (.xsRedir "restore", s', .done)
-    | _ =>
-      let (_step, s', c') := stepEval s stmt
-      (.xsRedir "body", s', .pushredir c' saved)
+    if isTerminatingControl stmt then
+      checkTraps (.xsRedir "popping redirects", restoreFds s saved, stmt)
+    else
+      let (_step, s', c') := stepEval s stmt checked
+      (.xsNested (.xsRedir "") _step, s', .pushredir c' saved)
 
   -- EvalLoop
   | .evalLoop linno _ctx src _mode _level =>
-    (.xsEval linno src "eval-loop", s, .done)
+    -- Parse the source string into a Stmt and execute it
+    match src with
+    | .parseString _ cmdStr =>
+      let stmt := parseTrapString cmdStr
+      (.xsEval linno src "eval-loop-start", s, .evalLoopCmd linno _ctx src _mode _level stmt)
+    | _ =>
+      (.xsEval linno src "eval-loop-unknown-src", s, .done)
 
   | .evalLoopCmd linno _ctx src _mode _level cmd =>
     match cmd with
-    | .done => (.xsEval linno src "next", s, .evalLoop (linno + 1) _ctx src _mode _level)
+    | .done =>
+      -- For parseString sources (trap/eval), the entire string is parsed at once,
+      -- so when done, just finish (don't loop back to re-parse the same string)
+      (.xsEval linno src "eval-done", s, .done)
+    | .break_ n => (.xsEval linno src "eval-break", s, .break_ n)
+    | .continue_ n => (.xsEval linno src "eval-continue", s, .continue_ n)
+    | .return_ => (.xsEval linno src "eval-return", s, .return_)
+    | .exit_ => (.xsEval linno src "eval-exit", s, .exit_)
     | _ =>
-      let (_step, s', c') := stepEval s cmd
+      let (_step, s', c') := stepEval s cmd .unchecked
       (.xsEval linno src "running", s', .evalLoopCmd linno _ctx src _mode _level c')
 
 
   -- Simple command execution (invoked via runCommand dispatch)
-  | .exec path prog args env binsh =>
-    -- Dispatch via Shell typeclass
-    Shell.runCommand s { shouldFork := false, ranCmdSubst := false, forceSimpleCommand := false } .unchecked prog args env []
+  | .exec _cmd prog _args _env _binsh =>
+    -- In symbolic mode, execve doesn't actually work.
+    -- OCaml: call execve, get error, fail.
+    let s' := OS.osExecve s prog
+    (.xsSimple "exec", failWith "symbolic execve unimplemented" s',
+     if isInteractive s' then .done else .exit_)
 
   | .commandExpAssign ((x, es) :: assigns) args savedFds opts =>
     let (step, s', es') := stepExpansion (stepEval' s) s es
+    -- OCaml semantics.ml:788-790: track ran_cmd_subst during assignment expansion
+    let opts' := { opts with ranCmdSubst := opts.ranCmdSubst || ranCommandSubstitution step }
     match es' with
     | .expDone f =>
       match forceLocalParam s' x (symbolicStringOfFields f) with
       | Sum.inl err =>
+        -- Match OCaml semantics.ml:796-817
+        let specialOrAssign := match args with
+          | cmd :: _ =>
+            let (_, _, progName) := concretize s' cmd
+            isSpecialBuiltinName progName && !opts'.forceSimpleCommand
+          | [] => true
+        let mayExit := s'.sh.opts.any (· == .errexit) || !isInteractive s'
         let s'' := safeWriteStderr (err ++ "\n") s'
-        (.xsSimple "assignment error", exitWith 2 s'', Stmt.done)
+        (.xsSimple "assignment error", exitWith 2 s'',
+         if specialOrAssign && mayExit then .exit_ else .done)
       | Sum.inr s'' =>
-        (.xsSimple ("assign " ++ x), s'', .commandExpAssign assigns args savedFds opts)
-    | .expError f =>
-      let errMsg := String.join (f.map (fun field => String.join (field.map (fun c => match c with | .c ch => String.ofList [ch] | .sym _ => "?"))))
-      (.xsSimple "assignment expansion error", failWith errMsg s', Stmt.done)
+        (.xsSimple ("assign " ++ x), s'', .commandExpAssign assigns args savedFds opts')
+    | .expError err =>
+      expansionError true s' (.xsSimple "assignment expansion") step err
     | _ =>
-      (.xsExpand (.xsSimple "") step, s', .commandExpAssign ((x, es') :: assigns) args savedFds opts)
+      (.xsExpand (.xsSimple "") step, s', .commandExpAssign ((x, es') :: assigns) args savedFds opts')
 
   -- CommandExpAssign: all assignments expanded, check for command
   | .commandExpAssign [] args savedFds opts =>
@@ -953,41 +1190,53 @@ partial def stepEval (s : OsState α) (c : Stmt)
       let s2 := restoreFds s1 savedFds
       let s3 := if opts.ranCmdSubst then s2 else exitWith 0 s2
       let s4 := assigns.foldr (fun (x, v) os => checkedSetParam x v os) s3
-      (.xsSimple "finished assignments w/o command, popping redirects", s4, Stmt.done)
+      checkTraps (.xsSimple "finished assignments w/o command, popping redirects", s4, Stmt.done)
     | cmd :: argv =>
       (.xsSimple "assignments fully expanded", s1, .commandReady assigns cmd argv savedFds opts)
 
   -- CommandReady: dispatch command
   | .commandReady assigns prog args savedFds opts =>
     if s.sh.opts.any (· == .noexec) then
-      (.xsSimple "set -n: skipping command", s, Stmt.done)
+      checkTraps (.xsSimple "set -n: skipping command", s, Stmt.done)
     else
       let (s0, _concretizedSS, progName) := concretize s prog
+      -- OCaml: `not concretized` means 'was already concrete' — for our concrete strings this is always true
       -- For special builtins, apply assignments to current environment
+      let progSpecial := isSpecialBuiltinName progName
       let s1 :=
-        if isSpecialBuiltinName progName && !opts.forceSimpleCommand
+        if progSpecial && !opts.forceSimpleCommand
         then assigns.foldr (fun (x, v) os => checkedSetParam x v os) s0
         else s0
-      -- Try to find a function
-      match s1.sh.funcs.find? (fun (n, _) => n == progName) with
-      | some (_, body) =>
-        -- Function call
-        let outerLoopNest := s1.sh.loopNest
-        let outerParams := s1.sh.positionalParams
-        let newParams := prog :: args.map id
-        let s2 := { s1 with sh := { s1.sh with
-          positionalParams := newParams,
-          loopNest := 0,
-          locals := [] :: s1.sh.locals } }
-        (.xsSimple "function-call", s2, pushredir' (.call outerLoopNest outerParams progName body body) savedFds)
-      | none =>
-        -- No function found - just mark as external/builtin dispatch
-        -- Full dispatch is in Command.lean which wraps stepEval
-        (.xsSimple "command-dispatch", s1, pushredir' (.exec (symbolicStringOfString progName) prog (args.map id) assigns .tryBinSh) savedFds)
+      -- catching_errors: not checked_exit && errexit is set (OCaml semantics.ml:942)
+      let catchingErrors := !checked.checkedExit && s1.sh.opts.any (· == .errexit)
+      -- exit_on_error: catching_errors || (special && !forceSimple && !interactive)
+      let exitOnError := catchingErrors ||
+        (progSpecial && !opts.forceSimpleCommand && !(s1.sh.opts.any (· == .interactive)))
+      -- Build env from assignments
+      let env1 := assigns.map id
+      -- Dispatch through runCommand (handles special builtins, functions, regular builtins, external)
+      match Shell.runCommand s1 opts checked prog args env1 savedFds with
+      | .inr (s2, .done, restore) =>
+        -- Command completed
+        let stmt' :=
+          if catchingErrors && s2.sh.exitCode != 0 then .exit_
+          else if restore then pushredir' .done savedFds
+          else .done
+        checkTraps (.xsSimple ("done running " ++ stringOfSymbolicString prog), s2, stmt')
+      | .inr (s2, cont, restore) =>
+        -- Command returned continuation
+        let stmt' := if restore then pushredir' cont savedFds else cont
+        (.xsSimple ("running " ++ stringOfSymbolicString prog), s2, stmt')
+      | .inl (s2, msg) =>
+        -- Error from run_command
+        checkTraps (.xsSimple "couldn't run command",
+         failWith (stringOfSymbolicString prog ++ ": " ++ msg) s2,
+         if exitOnError then .exit_
+         else pushredir' .done savedFds)
 
 where
   stepEval' (_s : OsState α) : StepFun α := fun os stmt =>
-    let (_step, os', stmt') := stepEval os stmt
+    let (_step, os', stmt') := stepEval os stmt .unchecked
     (os', match stmt' with | .done => .inr (some os'.sh.exitCode) | _ => .inl (_step, stmt'))
 
 end Semantics

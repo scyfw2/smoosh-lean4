@@ -19,75 +19,37 @@ def collectNonIfs (ifs : List Char) : List Char → List Char × List Char
 
 /-! # Expanded string splitting by IFS -/
 
--- Split a string by IFS characters. Returns a non-empty list:
--- The FIRST element should be concatenated with the current field being built.
--- Remaining elements become new fields.
-partial def splitExpstring (ifs : List Char) (clst : List Char) : List (List Char) :=
+-- OCaml: split_expstring ifs clst produces IntermediateFields with WFS/FS/Field distinction.
+-- WFS for IFS whitespace chars, FS for non-whitespace IFS delimiters, Field for data.
+partial def splitExpstring (ifs : List Char) (clst : List Char) : IntermediateFields :=
   match clst with
-  | [] => [[]]
+  | [] => []
   | c :: cs =>
     if c ∈ ifs then
-      [] :: splitExpstring ifs cs
+      (if isWs c then TmpField.wfs else TmpField.fs) :: splitExpstring ifs cs
     else
-      let (f, remaining) := collectNonIfs ifs (c :: cs)
-      match splitExpstring ifs remaining with
-      | [] => [f]
-      | first :: rest => (f ++ first) :: rest
+      let (cc, remaining) := collectNonIfs ifs cs
+      TmpField.field (symbolicStringOfString (String.ofList (c :: cc))) :: splitExpstring ifs remaining
 
 /-! # Word splitting -/
 
--- splitWord accumulates a current field (curField) and produces IntermediateFields.
--- Adjacent expanded words without .usrF are concatenated into the same field.
-partial def splitWord (ifs : List Char) : SymbolicString × ExpandedWords → IntermediateFields
-  | (curField, []) =>
-    -- Flush remaining current field
-    if curField.isEmpty then [] else [.field curField]
-  | (curField, .usrF :: wrds) =>
-    -- User field separator: flush current field, add separator
-    let flushed := if curField.isEmpty then [] else [.field curField]
-    flushed ++ [.wfs] ++ splitWord ifs ([], wrds)
-  | (curField, .expS s :: wrds) =>
-    if s.isEmpty then
-      -- Empty expanded string: just continue building current field
-      splitWord ifs (curField, wrds)
-    else
-      let parts := splitExpstring ifs s.toList
-      match parts with
-      | [] => splitWord ifs (curField, wrds)
-      | [single] =>
-        -- No splits: concatenate with current field
-        splitWord ifs (curField ++ symbolicStringOfString (String.ofList single), wrds)
-      | first :: rest =>
-        -- Multiple parts: first extends current field, middle parts become fields,
-        -- last part becomes the new current field for next iteration
-        let firstField := curField ++ symbolicStringOfString (String.ofList first)
-        let lastPart := rest.getLast!
-        let middleParts := rest.dropLast
-        let fields := (if firstField.isEmpty then [] else [TmpField.field firstField]) ++
-          middleParts.map (fun p => TmpField.field (symbolicStringOfString (String.ofList p)))
-        splitWord ifs (symbolicStringOfString (String.ofList lastPart), wrds) |> (fields ++ ·)
-  | (curField, .usrS s :: wrds) =>
-    -- User string: concatenate with current field (no IFS splitting)
-    splitWord ifs (curField ++ symbolicStringOfString s, wrds)
-  | (curField, .at_ fs :: wrds) =>
-    -- Positional @ args: each becomes a separate field
-    match fs with
-    | [] => splitWord ifs (curField, wrds)
-    | [single] =>
-      -- Single @ element: concatenate with current field
-      splitWord ifs (curField ++ single, wrds)
-    | first :: rest =>
-      let firstField := curField ++ first
-      let lastPart := rest.getLast!
-      let middleParts := rest.dropLast
-      let fields := [TmpField.field firstField] ++
-        middleParts.map (fun ss => TmpField.field ss)
-      splitWord ifs (lastPart, wrds) |> (fields ++ ·)
-  | (curField, .dquo ss :: wrds) =>
-    -- Quoted string: concatenate with current field (no splitting)
-    splitWord ifs (curField ++ ss, wrds)
-  | (curField, .ewSym sym :: wrds) =>
-    splitWord ifs (curField ++ [.sym sym], wrds)
+-- OCaml: split_word ifs (f, expanded_words) where f is IntermediateFields accumulator.
+-- Matching OCaml's (intermediate_fields * expanded_words) pair.
+partial def splitWord (ifs : List Char) : IntermediateFields × ExpandedWords → IntermediateFields
+  | (f, []) => f
+  | (f, .usrF :: .usrF :: wrds) => splitWord ifs (f, .usrF :: wrds)
+  | (f, .usrF :: wrds) => splitWord ifs (f ++ [.fs], wrds)
+  | (f, .expS s :: wrds) =>
+    let newFields := splitExpstring ifs s.toList
+    splitWord ifs (f ++ newFields, wrds)
+  | (f, .usrS s :: wrds) =>
+    splitWord ifs (f ++ [.field (symbolicStringOfString s)], wrds)
+  | (f, .at_ fs :: wrds) =>
+    splitWord ifs (f ++ fs.map (fun s => TmpField.field s), wrds)
+  | (f, .dquo ss :: wrds) =>
+    splitWord ifs (f ++ [.qfield ss], wrds)
+  | (f, .ewSym sym :: wrds) =>
+    splitWord ifs (f ++ [.field [.sym sym]], wrds)
 
 /-! # Concat expanded words -/
 
@@ -102,49 +64,88 @@ def concatExpanded : ExpandedWords → SymbolicString
 
 /-! # Skip field splitting -/
 
-def skipFieldSplitting : ExpandedWords → IntermediateFields
+-- OCaml: skip_field_splitting collapses UsrF::UsrF, turns UsrF into FS,
+-- and uses QField (not Field) for DQuo/At.
+partial def skipFieldSplitting : ExpandedWords → IntermediateFields
   | [] => []
-  | .usrF :: ws => skipFieldSplitting ws
+  | .usrF :: .usrF :: ws => skipFieldSplitting (.usrF :: ws)
+  | .usrF :: ws => .fs :: skipFieldSplitting ws
   | .expS s :: ws => .field (symbolicStringOfString s) :: skipFieldSplitting ws
   | .usrS s :: ws => .field (symbolicStringOfString s) :: skipFieldSplitting ws
-  | .at_ fs :: ws => fs.map (fun ss => TmpField.field ss) ++ skipFieldSplitting ws
+  | .at_ fs :: ws =>
+    -- OCaml: intersperse FS (map QField fs)
+    let qfields := fs.map (fun ss => TmpField.qfield ss)
+    let interspersed := qfields.intersperse .fs
+    interspersed ++ skipFieldSplitting ws
   | .dquo ss :: ws => .qfield ss :: skipFieldSplitting ws
   | .ewSym sym :: ws => .field [.sym sym] :: skipFieldSplitting ws
 
-/-! # Full field splitting -/
-
-def fieldSplitting {α : Type} [OS α] (os : OsState α) (expWords : ExpandedWords) : IntermediateFields :=
-  match lookupConcreteParam os "IFS" with
-  | none => splitWord [' ', '\n', '\t'] ([], expWords)
-  | some "" => skipFieldSplitting expWords
-  | some s => splitWord s.toList ([], expWords)
-
 /-! # Combine fields -/
 
+-- OCaml: combine_fields merges adjacent Field/QField and normalizes WFS/FS.
+-- Key cases: Field++Field, QField++QField, QField++Field (escape_patterns), Field++QField (escape_patterns).
 partial def combineFields : IntermediateFields → IntermediateFields
   | [] => []
   | [.wfs] => []
   | .wfs :: .wfs :: rst => combineFields (.wfs :: rst)
   | .wfs :: .fs :: rst => combineFields (.fs :: rst)
   | .fs :: .wfs :: rst => combineFields (.fs :: rst)
-  | .wfs :: rst => combineFields rst
+  | .field s1 :: .field s2 :: rst => combineFields (.field (s1 ++ s2) :: rst)
+  | .qfield s1 :: .qfield s2 :: rst => combineFields (.qfield (s1 ++ s2) :: rst)
+  | .qfield s1 :: .field s2 :: rst => combineFields (.field (escapePatterns s1 ++ s2) :: rst)
+  | .field s1 :: .qfield s2 :: rst => combineFields (.field (s1 ++ escapePatterns s2) :: rst)
+  | .wfs :: rst => .fs :: combineFields rst
   | f :: rst => f :: combineFields rst
+
+/-! # Clean fields -/
+
+-- OCaml: clean_fields strips leading WFS, then calls combine_fields.
+partial def cleanFields : IntermediateFields → IntermediateFields
+  | .wfs :: rst => cleanFields rst
+  | other => combineFields other
+
+/-! # Full field splitting -/
+
+def fieldSplitting {α : Type} [OS α] (os : OsState α) (expWords : ExpandedWords) : IntermediateFields :=
+  match lookupConcreteParam os "IFS" with
+  | none => cleanFields (splitWord [' ', '\n', '\t'] ([], expWords))
+  | some "" => skipFieldSplitting expWords
+  | some s => cleanFields (splitWord s.toList ([], expWords))
 
 /-! # Pathname expansion -/
 
+-- OCaml: needs_expansion checks if pattern chars exist (optimization)
+def needsExpansion : SymbolicString → Bool
+  | [] => false
+  | [.c '['] => false  -- kludge for a bare [
+  | .c '?' :: _ => true
+  | .c '*' :: _ => true
+  | .c '[' :: _ => true
+  | _ :: ss => needsExpansion ss
+
+-- OCaml: insert_field_separators interleaves FS between expanded path matches
+def insertFieldSeparators : List String → IntermediateFields
+  | [] => []
+  | [f] => [.field (symbolicStringOfString f)]
+  | f :: fs => .field (symbolicStringOfString f) :: .fs :: insertFieldSeparators fs
+
+-- OCaml: pathname_expansion only expands unquoted Field entries
 def pathnameExpansion {α : Type} [OS α] (os : OsState α) (ifs : IntermediateFields) : IntermediateFields :=
   if os.sh.opts.any (· == .noglob) then ifs
   else
     ifs.flatMap (fun tf =>
       match tf with
       | .field ss =>
-        match tryConcrete ss with
-        | none => [tf]
-        | some s =>
-          let matched := matchPath os s
-          match matched with
-          | [] => [tf]
-          | _ => matched.map (fun p => TmpField.field (symbolicStringOfString p))
+        let matched :=
+          if needsExpansion ss then
+            match tryConcrete ss with
+            | some pat => matchPath os pat
+            | none => []
+          else []
+        if matched.isEmpty then
+          [.field (unescapePattern ss)]
+        else
+          insertFieldSeparators matched
       | other => [other])
 
 /-! # Quote removal -/
@@ -154,13 +155,15 @@ def removeQuotes : IntermediateFields → IntermediateFields
   | .qfield s :: rst => .field s :: removeQuotes rst
   | f :: rst => f :: removeQuotes rst
 
-
+-- OCaml: to_fields handles FS::FS producing empty fields
 def toFields : IntermediateFields → Fields
   | [] => []
   | .field fs :: rst => fs :: toFields rst
   | .qfield fs :: rst => fs :: toFields rst
-  | .wfs :: rst => toFields rst
+  | .fs :: .fs :: rst => symbolicStringOfString "" :: toFields (.fs :: rst)
   | .fs :: rst => toFields rst
+  -- WFS should have been cleaned by combine_fields; if any remain, skip
+  | .wfs :: rst => toFields rst
 
 def finalizeFields : IntermediateFields → Fields
   | .fs :: rst => symbolicStringOfString "" :: finalizeFields rst

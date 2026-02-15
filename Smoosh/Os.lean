@@ -112,20 +112,89 @@ def lookupConcreteParam (os : OsState α) (x : String) : Option String :=
 def isSetParam (os : OsState α) (x : String) : Bool :=
   (lookupStringParam os x).isSome
 
+/-- Search through local scopes to update opts on a variable (OCaml: set_local_param_opts_loop) -/
+def setLocalParamOptsLoop (x : String) (upd : LocalOpts → LocalOpts) : List LocalEnv → Option (List LocalEnv)
+  | [] => none
+  | frame :: rest =>
+    match frame.find? (fun (y, _) => x == y) with
+    | none =>
+      match setLocalParamOptsLoop x upd rest with
+      | none => none
+      | some rest' => some (frame :: rest')
+    | some (_, (v, opts)) =>
+      let frame' := (x, (v, upd opts)) :: frame.filter (fun (y, _) => x != y)
+      some (frame' :: rest)
+
+/-- Update opts on a local variable if found (OCaml: set_local_param_opts) -/
+def setLocalParamOpts (os : OsState α) (x : String) (upd : LocalOpts → LocalOpts) : OsState α × Bool :=
+  match setLocalParamOptsLoop x upd os.sh.locals with
+  | none => (os, false)
+  | some locals' => ({ os with sh := { os.sh with locals := locals' } }, true)
+
+/-- Search through local scopes to set a variable value (OCaml: set_local_param_loop) -/
+def setLocalParamLoop (x : String) (mv : Option SymbolicString) : List LocalEnv → Option (List LocalEnv)
+  | [] => none
+  | frame :: rest =>
+    match frame.find? (fun (y, _) => x == y) with
+    | none =>
+      match setLocalParamLoop x mv rest with
+      | none => none
+      | some rest' => some (frame :: rest')
+    | some (_, (_, opts)) =>
+      let frame' := (x, (mv, opts)) :: frame.filter (fun (y, _) => x != y)
+      some (frame' :: rest)
+
+/-- Set a local variable value if found (OCaml: set_local_param) -/
+def setLocalParamBool (os : OsState α) (x : String) (mv : Option SymbolicString) : OsState α × Bool :=
+  match setLocalParamLoop x mv os.sh.locals with
+  | none => (os, false)
+  | some locals' => ({ os with sh := { os.sh with locals := locals' } }, true)
+
+/-- Mark a variable as exported, checking local scopes first (OCaml: set_exported) -/
+def setExported (os : OsState α) (x : String) : OsState α :=
+  let (os1, foundLocal) := setLocalParamOpts os x (fun opts => { opts with localExported := true })
+  if foundLocal then os1
+  else { os1 with sh := { os1.sh with export_ := if os1.sh.export_.any (· == x) then os1.sh.export_ else x :: os1.sh.export_ } }
+
+/-- Mark a variable as readonly, checking local scopes first (OCaml: set_readonly) -/
+def setReadonly (os : OsState α) (x : String) : OsState α :=
+  let (os1, foundLocal) := setLocalParamOpts os x (fun opts => { opts with localReadonly := true })
+  if foundLocal then os1
+  else { os1 with sh := { os1.sh with readonly := if os1.sh.readonly.any (· == x) then os1.sh.readonly else x :: os1.sh.readonly } }
+
+/-- Collect variables matching a selector across globals and local scopes (OCaml: collect_vars) -/
+def collectVars (getGlobals : OsState α → List String) (selectLocal : LocalOpts → Bool) (os : OsState α) :
+    List (String × Option SymbolicString) :=
+  -- Start with globals
+  let globals := (getGlobals os).map (fun x => (x, lookupStringParam os x))
+  -- Then layer in locals (foldr so more recent scopes override)
+  let addLocal (frame : LocalEnv) (env : List (String × Option SymbolicString)) : List (String × Option SymbolicString) :=
+    let selected := frame.filterMap (fun (x, (mv, opts)) =>
+      if selectLocal opts then some (x, mv) else none)
+    -- override bindings in env with the local ones
+    let env' := env.filter (fun (x, _) => !selected.any (fun (y, _) => x == y))
+    selected ++ env'
+  os.sh.locals.foldr addLocal globals
+
+/-- Get exported variables (OCaml: exported_vars) -/
+def exportedVars (os : OsState α) : List (String × Option SymbolicString) :=
+  collectVars (fun os => os.sh.export_) (fun opts => opts.localExported) os
+
+/-- Get readonly variables (OCaml: readonly_vars) -/
+def readonlyVars (os : OsState α) : List (String × Option SymbolicString) :=
+  collectVars (fun os => os.sh.readonly) (fun opts => opts.localReadonly) os
+
+/-- Get exported variables that are set (OCaml: exported_set_vars) -/
+def exportedSetVars (os : OsState α) : Env :=
+  (exportedVars os).filterMap (fun (x, mv) => match mv with | some v => some (x, v) | none => none)
+
+/-- Set a variable value, checking local scopes first (OCaml: internal_set_param) -/
 def internalSetParam (x : String) (v : SymbolicString) (os : OsState α) : OsState α :=
-  match os.sh.locals with
-  | [] => -- no locals, set in env
+  let (os1, foundLocal) := setLocalParamBool os x (some v)
+  if foundLocal then os1
+  else
     let env' := (x, v) :: os.sh.env.filter (fun (y, _) => x != y)
     { os with sh := { os.sh with env := env' } }
-  | frame :: rest =>
-    -- check if exists in current frame
-    if frame.any (fun (y, _) => x == y) then
-      let frame' := frame.map (fun (y, vo) => if x == y then (y, (some v, vo.2)) else (y, vo))
-      { os with sh := { os.sh with locals := frame' :: rest } }
-    else
-      -- set in env
-      let env' := (x, v) :: os.sh.env.filter (fun (y, _) => x != y)
-      { os with sh := { os.sh with env := env' } }
 
 def setLocalParam (x : String) (v : Option SymbolicString) (opts : LocalOpts) (os : OsState α) : OsState α :=
   match os.sh.locals with
@@ -134,13 +203,19 @@ def setLocalParam (x : String) (v : Option SymbolicString) (opts : LocalOpts) (o
     let frame' := (x, (v, opts)) :: frame.filter (fun (y, _) => x != y)
     { os with sh := { os.sh with locals := frame' :: rest } }
 
+/-- Unset a variable, checking local scopes first (OCaml: unset_param) -/
 def unsetParam (x : String) (os : OsState α) : Except String (OsState α) :=
   if os.sh.readonly.any (· == x) then
     .error s!"smoosh: unset: {x}: readonly variable"
   else
-    let env' := os.sh.env.filter (fun (y, _) => x != y)
-    let locals' := os.sh.locals.map (fun frame => frame.filter (fun (y, _) => x != y))
-    .ok { os with sh := { os.sh with env := env', locals := locals' } }
+    let (os1, foundLocal) := setLocalParamBool os x none
+    if foundLocal then .ok os1
+    else
+      let env' := os.sh.env.filter (fun (y, _) => x != y)
+      .ok { os1 with sh := { os1.sh with
+        env := env',
+        readonly := os1.sh.readonly.filter (· != x),
+        export_ := os1.sh.export_.filter (· != x) } }
 
 /-! # Exit code helpers -/
 
@@ -230,15 +305,23 @@ def updateTrap (sig : Signal) (handler : Option SymbolicString) (os : OsState α
     let traps' := (sig, h) :: os.sh.traps.filter (fun (s, _) => s != sig)
     { os with sh := { os.sh with traps := traps' } }
 
-def exitTrap (os : OsState α) : Option SymbolicString :=
+def exitTrap (os : OsState α) : OsState α × Option SymbolicString :=
   match os.sh.traps.find? (fun (s, _) => s == .EXIT) with
-  | some (_, h) => some h
-  | none => none
+  | some (_, h) =>
+    -- Remove EXIT trap after retrieval (OCaml: update_trap s0 EXIT Nothing)
+    let traps' := os.sh.traps.filter (fun (s, _) => s != .EXIT)
+    ({ os with sh := { os.sh with traps := traps' } }, some h)
+  | none => (os, none)
 
-def clearTrapsForSubshell (os : OsState α) : OsState α :=
-  -- keep only ignores (empty string handlers)
-  let traps' := os.sh.traps.filter (fun (_, h) => h.isEmpty)
-  { os with sh := { os.sh with traps := traps' } }
+def clearTrapsForSubshell (os : OsState α) : OsState α × List Signal :=
+  -- Partition traps into ignored (empty handler) and handled (non-empty)
+  let ignored := os.sh.traps.filter (fun (_, h) => h.isEmpty)
+  let handled := os.sh.traps.filter (fun (_, h) => !h.isEmpty)
+  -- Save original traps as supershell_traps; keep only ignored
+  ({ os with sh := { os.sh with
+      traps := ignored,
+      supershellTraps := some os.sh.traps } },
+   handled.map (fun (sig, _) => sig))
 
 /-! # Concretize helpers -/
 
@@ -255,6 +338,23 @@ def concretizeMany (os : OsState α) (sss : Fields) : OsState α × Fields × Li
       go os' (ss' :: acc.1, s :: acc.2) sss'
   go os ([], []) sss
 
+/-! # Function and positional param management -/
+
+/-- Look up a function definition by name -/
+def lookupFunction (os : OsState α) (name : String) : Option Stmt :=
+  match os.sh.funcs.find? (fun (n, _) => n == name) with
+  | some (_, body) => some body
+  | none => none
+
+/-- Set function params: preserves $0, replaces $1+ with argv, sets loopNest -/
+def setFunctionParams (ln : Nat) (argv : Fields) (os : OsState α) : OsState α :=
+  let newParams := match os.sh.positionalParams with
+    | [] => [] :: argv  -- no $0, use empty
+    | arg0 :: _ => arg0 :: argv
+  { os with sh := { os.sh with loopNest := ln, positionalParams := newParams } }
+
+
+
 /-! # Env building -/
 
 def lookupParam (os : OsState α) (x : String) : Option SymbolicString :=
@@ -270,7 +370,7 @@ def getEnv (os : OsState α) : Env :=
 /-! # Subshell prep -/
 
 def prepareSubshell (os : OsState α) : OsState α :=
-  let os1 := clearTrapsForSubshell os
+  let (os1, _clearedSignals) := clearTrapsForSubshell os
   { os1 with sh :=
     { os1.sh with
       outermost := false,
@@ -332,6 +432,7 @@ class OS (α : Type) where
   osIsReadable : OsState α → Path → Bool
   osIsWriteable : OsState α → Path → Bool
   osIsExecutable : OsState α → Path → Bool
+  osReadFile : OsState α → Path → Option String := fun _ _ => none
 
   -- fd operations
   osWriteFd : OsState α → Fd → String → Option (OsState α)

@@ -37,6 +37,9 @@ def specialBuiltinNames : List String :=
 
 def isSpecialBuiltin (name : String) : Bool := name ∈ specialBuiltinNames
 def isBuiltin (name : String) : Bool := name ∈ builtinNames
+def isShellKeyword (name : String) : Bool :=
+  name ∈ ["!", "{", "}", "case", "do", "done", "elif", "else", "esac", "fi",
+          "for", "if", "in", "then", "until", "while"]
 
 /-! # Path resolution -/
 
@@ -84,39 +87,56 @@ def builtinFalse (s : OsState α) (_argv : List SymbolicString) (_env : Env) :
   .inr (exitWith 1 s, .done, false)
 
 
+/-- Strip leading "--" argument from argv (after command name) -/
+def stripDoubleDash (argv : List SymbolicString) : List SymbolicString :=
+  match argv with
+  | dd :: rest =>
+    match tryConcrete dd with
+    | some "--" => rest
+    | _ => argv
+  | _ => argv
+
 def builtinBreak (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  match argv with
-  | [] | [_] =>
-    if s.sh.loopNest >= 1 then .inr (s, .break_ 1, true)
-    else .inl (s, "break: only applicable in loop")
-  | [_, n] =>
+  let nonlexical := s.sh.opts.any (· == .nonlexicalctrl)
+  let tryBreak (wantedN : Nat) :=
+    -- Clamp to loop_nest unless nonlexicalctrl is set
+    let n := if wantedN <= s.sh.loopNest || nonlexical then wantedN else s.sh.loopNest
+    if n <= 0 then
+      -- Outside any loop: silently succeed (POSIX: unspecified, smoosh returns Done)
+      .inr (exitWith 0 s, Stmt.done, true)
+    else
+      .inr (exitWith 0 s, .break_ n, true)
+  match stripDoubleDash (argv.drop 1) with
+  | [] => tryBreak 1
+  | [n] =>
     match tryConcrete n with
     | some ns =>
       match readNat ns.toList with
       | .ok 0 => .inl (s, ns ++ ": loop count out of range")
-      | .ok n =>
-        if n > s.sh.loopNest then .inl (s, ns ++ ": loop count out of range")
-        else .inr (s, .break_ n, true)
+      | .ok n => tryBreak n
       | .error _ => .inl (s, ns ++ ": positive argument required")
     | none => .inl (s, "symbolic argument")
   | _ => .inl (s, "too many arguments")
 
 def builtinContinue (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  match argv with
-  | [] | [_] =>
-    if s.sh.loopNest >= 1 then .inr (s, .continue_ 1, true)
-    else .inl (s, "continue: only applicable in loop")
-  | [_, n] =>
+  let nonlexical := s.sh.opts.any (· == .nonlexicalctrl)
+  let tryContinue (wantedN : Nat) :=
+    let n := if wantedN <= s.sh.loopNest || nonlexical then wantedN else s.sh.loopNest
+    if n <= 0 then
+      .inr (exitWith 0 s, Stmt.done, true)
+    else
+      .inr (exitWith 0 s, .continue_ n, true)
+  match stripDoubleDash (argv.drop 1) with
+  | [] => tryContinue 1
+  | [n] =>
     match tryConcrete n with
     | some ns =>
       match readNat ns.toList with
       | .ok 0 => .inl (s, ns ++ ": loop count out of range")
-      | .ok n =>
-        if n > s.sh.loopNest then .inl (s, ns ++ ": loop count out of range")
-        else .inr (s, .continue_ n, true)
-      | .error _ => .inl (s, ns ++ ": positive argument required")
+      | .ok n => tryContinue n
+      | .error _ => .inl (s, ns ++ ": positive numeric argument required")
     | none => .inl (s, "symbolic argument")
   | _ => .inl (s, "too many arguments")
 
@@ -165,14 +185,14 @@ def builtinCd (s : OsState α) (argv : List SymbolicString) (_env : Env) :
   match err with
   | none =>
     let s'' := { s' with sh := { s'.sh with cwd := dir } }
-    .inr (exitWith 0 s'', .done, false)
+    .inr (exitWith 0 s'', .done, true)
   | some msg => .inl (s', "cd: " ++ msg)
 
 def builtinPwd (s : OsState α) (_argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
   let cwd := s.sh.cwd
   let s' := writeStdout (cwd ++ "\n") s
-  .inr (exitWith 0 s', .done, false)
+  .inr (exitWith 0 s', .done, true)
 
 def builtinEcho (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
@@ -188,106 +208,193 @@ def builtinEcho (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     | _ => (false, args)
   let strs := printArgs.map (fun ss => (tryConcrete ss).getD "")
   let msg := String.intercalate " " strs ++ (if noNewline then "" else "\n")
-  let s' := writeStdout msg s
-  .inr (exitWith 0 s', .done, false)
+  let (s', ok) := tryWriteFd STDOUT msg s
+  if ok then
+    .inr (exitWith 0 s', .done, true)
+  else
+    .inr (exitWith 1 (writeStderr "echo: write error\n" s'), .done, true)
+
+/-- Show variable list for export/readonly -p using collectVars output -/
+def showVarlist' (s : OsState α) (cmd : String) (vars : List (String × Option SymbolicString)) : OsState α :=
+  let sorted := vars.mergeSort (fun a b => a.1 < b.1)
+  sorted.foldl (fun s (v, mv) =>
+    let valStr := match mv with
+      | some ss => "=" ++ quote' (stringOfSymbolicString ss)
+      | none => ""
+    let msg := cmd ++ " " ++ v ++ valStr ++ "\n"
+    writeStdout msg s) s
+
+/-- Update variable list for export/readonly -/
+def updateVarlist (s : OsState α) (_cmd : String) (setter : OsState α → String → OsState α)
+    (args : List SymbolicString) : Sum (OsState α × String) (OsState α × Stmt × Bool) :=
+  let rec loop (os : OsState α) (args : List SymbolicString) :=
+    match args with
+    | [] => .inr (exitWith 0 os, .done, true)
+    | arg :: args' =>
+      match tryConcrete arg with
+      | some astr =>
+        let parts := splitStringOn false '=' astr
+        match parts with
+        | [name] => loop (setter os name) args'
+        | name :: valParts =>
+          let val := String.intercalate "=" valParts
+          match setParam name (symbolicStringOfString val) os with
+          | .inl err => .inl (os, err)
+          | .inr os' => loop (setter os' name) args'
+        | _ => loop os args'
+      | none => loop os args'
+  loop s args
+
+def unsetFunction (name : String) (s : OsState α) : OsState α :=
+  { s with sh := { s.sh with funcs := s.sh.funcs.filter (fun (n, _) => n != name) } }
+
+partial def getOpts (allowed : List Char) (argv : List SymbolicString) :
+    List Char × List SymbolicString :=
+  match argv with
+  | [] => ([], [])
+  | arg :: rest =>
+    match tryConcrete arg with
+    | some s =>
+      if s.startsWith "-" && s != "-" && s != "--" then
+        let chars := s.toList.drop 1
+        if chars.all (allowed.contains ·) then
+          let (opts, args) := getOpts allowed rest
+          (chars ++ opts, args)
+        else
+          ([], argv)
+      else if s == "--" then
+        ([], rest)
+      else
+        ([], argv)
+    | none => ([], argv)
 
 def builtinExport (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  let args := match argv with
-    | [] => []
-    | _ :: rest => rest
-  let s' := args.foldl (fun os arg =>
-    match tryConcrete arg with
-    | some astr =>
-      let parts := splitStringOn false '=' astr
-      match parts with
-      | [name] =>
-        { os with sh := { os.sh with export_ :=
-          if name ∈ os.sh.export_ then os.sh.export_ else name :: os.sh.export_ } }
-      | name :: valParts =>
-        let val := String.intercalate "=" valParts
-        let os' := internalSetParam name (symbolicStringOfString val) os
-        { os' with sh := { os'.sh with export_ :=
-          if name ∈ os'.sh.export_ then os'.sh.export_ else name :: os'.sh.export_ } }
-      | _ => os
-    | none => os) s
-  .inr (exitWith 0 s', .done, true)
+  let s1 := exitWith 0 s
+  let (opts, args) := getOpts ['p'] argv
+  if opts.contains 'p' || args.isEmpty then
+    let vars := exportedVars s1
+    .inr (showVarlist' s1 "export" vars, .done, true)
+  else
+    updateVarlist s1 "export" setExported args
 
 def builtinUnset (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  let args := match argv with
-    | [] => []
-    | _ :: rest => rest
-  let (s', ec) := args.foldl (fun (os, ec) arg =>
-    match tryConcrete arg with
-    | some name =>
-      match unsetParam name os with
-      | .ok os' => (os', ec)
-      | .error msg =>
-        -- Readonly error: continue but set exit code 1
-        let os' := writeStderr ("unset: " ++ msg ++ "\n") os
-        (os', 1)
-    | none => (os, ec)) (s, 0)
-  .inr (exitWith ec s', .done, true)
+  let (opts, args) := getOpts ['f', 'v'] argv
+  let unsetFuncs := opts.contains 'f'
+  let unsetVars := opts.contains 'v' || !unsetFuncs
+
+  let rec loop (os : OsState α) (ec : Nat) (args : List SymbolicString) :=
+    match args with
+    | [] => .inr (exitWith ec os, .done, true)
+    | arg :: args' =>
+      match tryConcrete arg with
+      | some name =>
+        let os1 := if unsetFuncs then unsetFunction name os else os
+        if unsetVars then
+          match unsetParam name os1 with
+          | .ok os' => loop os' ec args'
+          | .error err => .inl (os1, err)
+        else
+          loop os1 ec args'
+      | none => .inl (os, "unset: symbolic argument")
+  loop s 0 args
 
 def builtinSet (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
+  let s0 := exitWith 0 s
   match argv with
   | [] | [_] =>
     -- Print all variables (simplified)
-    .inr (exitWith 0 s, .done, true)
+    .inr (s0, .done, true)
   | _ :: args =>
     -- Check for -- (set positional params)
     let setPositionalParams (rest : List SymbolicString) : OsState α :=
-      let prog := match s.sh.positionalParams with
+      let prog := match s0.sh.positionalParams with
         | p :: _ => p
         | [] => symbolicStringOfString ""
-      { s with sh := { s.sh with positionalParams := prog :: rest } }
-    match args with
-    | dashDash :: rest =>
-      match tryConcrete dashDash with
-      | some "--" =>
-        .inr (exitWith 0 (setPositionalParams rest), .done, true)
-      | some str =>
-        if str.startsWith "-" || str.startsWith "+" then
-          -- Handle options
-          let s' := args.foldl (fun os arg =>
-            match tryConcrete arg with
-            | some astr =>
-              match astr.toList with
-              | '-' :: opts =>
-                opts.foldl (fun os' c =>
-                  match ShOpt.ofShortopt c with
-                  | some opt => setShOpt os' opt
-                  | none => os') os
-              | '+' :: opts =>
-                opts.foldl (fun os' c =>
-                  match ShOpt.ofShortopt c with
-                  | some opt => unsetShOpt os' opt
-                  | none => os') os
-              | _ => os
-            | none => os) s
-          .inr (exitWith 0 s', .done, true)
+      { s0 with sh := { s0.sh with positionalParams := prog :: rest } }
+    -- Parse options using OCaml's set_getopts algorithm
+    -- Processes: -o optname, +o optname, -chars (short opts), +chars (unset short opts), --, args
+    let rec parseOpts (os : OsState α) (args : List SymbolicString) (setParams : Bool) :
+        Sum (OsState α × String) (OsState α × Stmt × Bool) :=
+      match args with
+      | [] =>
+        if setParams then
+          .inr (setPositionalParams [] |> exitWith 0, .done, true)
         else
-          -- Non-option args: treat as positional params
-          .inr (exitWith 0 (setPositionalParams args), .done, true)
-      | none => .inr (exitWith 0 (setPositionalParams args), .done, true)
-    | _ => .inr (exitWith 0 s, .done, true)
+          .inr (os, .done, true)
+      | arg :: rest =>
+        match tryConcrete arg with
+        | none => .inr (exitWith 0 (setPositionalParams args), .done, true)
+        | some s =>
+          match s.toList with
+          | ['-', '-'] =>
+            -- "--" means set positional params from rest
+            .inr (exitWith 0 (setPositionalParams rest), .done, true)
+          | ['-', 'o'] =>
+            -- "-o" followed by optname: turn ON
+            match rest with
+            | [] => .inr (os, .done, true) -- "set -o" with nothing: print opts (simplified)
+            | optName :: rest' =>
+              match tryConcrete optName with
+              | some name =>
+                match ShOpt.ofLongopt name with
+                | some opt => parseOpts (setShOpt os opt) rest' setParams
+                | none => .inr (failWith s!"set: illegal option -o {name}" os, .done, true)
+              | none => .inr (os, .done, true)
+          | ['+', 'o'] =>
+            -- "-o" followed by optname: turn OFF
+            match rest with
+            | [] => .inr (os, .done, true)
+            | optName :: rest' =>
+              match tryConcrete optName with
+              | some name =>
+                match ShOpt.ofLongopt name with
+                | some opt => parseOpts (unsetShOpt os opt) rest' setParams
+                | none => .inr (failWith s!"set: illegal option +o {name}" os, .done, true)
+              | none => .inr (os, .done, true)
+          | '-' :: opts =>
+            -- Short options: -abc means set a, b, c
+            let os' := opts.foldl (fun os' c =>
+              match ShOpt.ofShortopt c with
+              | some opt => setShOpt os' opt
+              | none => os') os
+            parseOpts os' rest setParams
+          | '+' :: opts =>
+            -- Unset short options: +abc means unset a, b, c
+            let os' := opts.foldl (fun os' c =>
+              match ShOpt.ofShortopt c with
+              | some opt => unsetShOpt os' opt
+              | none => os') os
+            parseOpts os' rest setParams
+          | _ =>
+            -- Non-option arg: treat all remaining as positional params
+            .inr (exitWith 0 (setPositionalParams (arg :: rest)), .done, true)
+    parseOpts s0 args false
 
 def builtinShift (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  let n := match argv with
-    | [] | [_] => 1
-    | [_, ns] =>
-      match tryConcrete ns with
-      | some s => match readNat s.toList with | .ok n => n | .error _ => 1
-      | none => 1
-    | _ => 1
-  let params := s.sh.positionalParams
-  let shifted := match params with
-    | [] => []
-    | prog :: rest => prog :: rest.drop n
-  .inr (exitWith 0 { s with sh := { s.sh with positionalParams := shifted } }, .done, true)
+  match argv with
+  | [] =>
+    if s.sh.positionalParams.length < 1 then
+      .inl (s, "shift: shift count must be <= $#")
+    else
+      let params' := s.sh.positionalParams.drop 1
+      .inr (exitWith 0 { s with sh := { s.sh with positionalParams := params' } }, .done, true)
+  | [arg] =>
+    match tryConcrete arg with
+    | some nStr =>
+      match nStr.toNat? with
+      | some n =>
+        if n > s.sh.positionalParams.length then
+          .inl (s, "shift: shift count must be <= $#")
+        else
+          let params' := s.sh.positionalParams.drop n
+          .inr (exitWith 0 { s with sh := { s.sh with positionalParams := params' } }, .done, true)
+      | none => .inl (s, "shift: numeric argument required")
+    | none => .inl (s, "shift: symbolic argument")
+  | _ => .inl (s, "shift: too many arguments")
 
 
 def builtinTrap (s : OsState α) (argv : List SymbolicString) (_env : Env) :
@@ -374,34 +481,13 @@ def builtinTrap (s : OsState α) (argv : List SymbolicString) (_env : Env) :
 
 def builtinReadonly (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  let args := match argv with
-    | [] => []
-    | _ :: rest => rest
-  -- Check for -p flag (print readonly vars)
-  match args with
-  | [] => .inr (exitWith 0 s, .done, true)
-  | _ =>
-  let s' := args.foldl (fun os arg =>
-    match tryConcrete arg with
-    | some astr =>
-      if astr == "-p" then os
-      else
-        -- Check for name=value
-        let parts := splitStringOn false '=' astr
-        match parts with
-        | [name] =>
-          -- Just mark readonly
-          { os with sh := { os.sh with readonly :=
-            if name ∈ os.sh.readonly then os.sh.readonly else name :: os.sh.readonly } }
-        | name :: valParts =>
-          -- Set value AND mark readonly
-          let val := String.intercalate "=" valParts
-          let os' := internalSetParam name (symbolicStringOfString val) os
-          { os' with sh := { os'.sh with readonly :=
-            if name ∈ os'.sh.readonly then os'.sh.readonly else name :: os'.sh.readonly } }
-        | _ => os
-    | none => os) s
-  .inr (exitWith 0 s', .done, true)
+  let s1 := exitWith 0 s
+  let (opts, args) := getOpts ['p'] argv
+  if opts.contains 'p' || args.isEmpty then
+    let vars := readonlyVars s1
+    .inr (showVarlist' s1 "readonly" vars, .done, true)
+  else
+    updateVarlist s1 "readonly" setReadonly args
 
 def builtinAlias (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
@@ -472,7 +558,9 @@ def builtinType (s : OsState α) (argv : List SymbolicString) (_env : Env) :
   let (s', ec) := args.foldl (fun (os, ec) arg =>
     match tryConcrete arg with
     | some name =>
-      if isBuiltin name then
+      if isShellKeyword name then
+        (writeStdout (name ++ " is a shell keyword\n") os, ec)
+      else if isBuiltin name then
         (writeStdout (name ++ " is a shell builtin\n") os, ec)
       else
         let (os', mpath) := resolveCommandName os name
@@ -512,15 +600,43 @@ def builtinDot (s : OsState α) (argv : List SymbolicString) (_env : Env) :
 
 def builtinEval (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  .inl (s, "eval: not implemented (requires runtime parser)")
+  -- Note: Lean's runCommand passes progName :: args for special builtins,
+  -- so we need to skip argv[0] ("eval")
+  let args := argv.drop 1
+  if args.isEmpty then
+    .inr (exitWith 0 s, .done, true)
+  else
+    -- Strip leading "--" if present (OCaml: strip_double_dash)
+    let args' := match args with
+      | arg :: rest => match tryConcrete arg with
+        | some "--" => rest
+        | _ => args
+      | _ => args
+    -- Join args with spaces to get the command string (OCaml: string_of_fields)
+    let cmdStr := String.intercalate " " (args'.map stringOfSymbolicString)
+    -- Create EvalLoop statement (OCaml: EvalLoop 1 (sstr, Just (stack_init ())) src Noninteractive Subsidiary)
+    let stmt := Stmt.evalLoop 1 (none, none) (.parseString .parseEval cmdStr) .noninteractive .subsidiary
+    .inr (s, stmt, true)
 
 
 def builtinWait (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
   match argv with
   | [] | [_] =>
-    -- Wait for all children
-    .inr (exitWith 0 s, .done, false)
+    -- Wait for all children (OCaml: active_jobs + sequence of Wait)
+    let activeJobs := s.sh.jobs.filter fun j =>
+      match j.status with
+      | .jobRunning => true
+      | .jobStopped _ => true
+      | _ => false
+
+    let waits := activeJobs.map fun j =>
+      Stmt.wait j.pid .unchecked none .waitCommand
+    -- Sequence all waits, ending with skip to return 0
+    let stmt := match waits with
+      | [] => Stmt.done
+      | ws => ws.foldr (fun w acc => Stmt.semi w acc) Stmt.done
+    .inr (s, stmt, false)
   | [_, pidArg] =>
     match tryConcrete pidArg with
     | some ps =>
@@ -575,6 +691,67 @@ where
 
 /-! # Printf builtin -/
 
+/-- Process escape sequences in a string (for %b) -/
+partial def printfProcessEscapes : List Char → List Char → List Char
+  | [], acc => acc.reverse
+  | '\\' :: 'n' :: rest, acc => printfProcessEscapes rest ('\n' :: acc)
+  | '\\' :: 't' :: rest, acc => printfProcessEscapes rest ('\t' :: acc)
+  | '\\' :: 'r' :: rest, acc => printfProcessEscapes rest ('\r' :: acc)
+  | '\\' :: 'a' :: rest, acc => printfProcessEscapes rest ('\x07' :: acc)
+  | '\\' :: 'b' :: rest, acc => printfProcessEscapes rest ('\x08' :: acc)
+  | '\\' :: 'f' :: rest, acc => printfProcessEscapes rest ('\x0C' :: acc)
+  | '\\' :: 'v' :: rest, acc => printfProcessEscapes rest ('\x0B' :: acc)
+  | '\\' :: '\\' :: rest, acc => printfProcessEscapes rest ('\\' :: acc)
+  | '\\' :: '0' :: rest, acc =>
+    let (digits, rest') := rest.span (fun c => c >= '0' && c <= '7')
+    let val := digits.foldl (fun n c => n * 8 + (c.toNat - '0'.toNat)) 0
+    printfProcessEscapes rest' (Char.ofNat val :: acc)
+  | c :: rest, acc => printfProcessEscapes rest (c :: acc)
+
+/-- Apply format string once, consuming some arguments and returning remainder -/
+partial def printfGoFmt : List Char → List String → List Char → String × List String
+  | [], args, acc => (String.ofList acc.reverse, args)
+  | '%' :: 's' :: rest, arg :: args', acc =>
+    printfGoFmt rest args' (arg.toList.reverse ++ acc)
+  | '%' :: 's' :: rest, [], acc =>
+    printfGoFmt rest [] acc
+  | '%' :: 'b' :: rest, arg :: args', acc =>
+    let processed := printfProcessEscapes arg.toList []
+    printfGoFmt rest args' (processed.reverse ++ acc)
+  | '%' :: 'b' :: rest, [], acc =>
+    printfGoFmt rest [] acc
+  | '%' :: 'c' :: rest, arg :: args', acc =>
+    match arg.toList with
+    | c :: _ => printfGoFmt rest args' (c :: acc)
+    | [] => printfGoFmt rest args' acc
+  | '%' :: 'c' :: rest, [], acc =>
+    printfGoFmt rest [] acc
+  | '%' :: 'd' :: rest, arg :: args', acc =>
+    printfGoFmt rest args' (arg.toList.reverse ++ acc)
+  | '%' :: 'd' :: rest, [], acc =>
+    printfGoFmt rest [] ('0' :: acc)
+  | '%' :: '%' :: rest, args, acc =>
+    printfGoFmt rest args ('%' :: acc)
+  | '\\' :: 'n' :: rest, args, acc =>
+    printfGoFmt rest args ('\n' :: acc)
+  | '\\' :: 't' :: rest, args, acc =>
+    printfGoFmt rest args ('\t' :: acc)
+  | '\\' :: '\\' :: rest, args, acc =>
+    printfGoFmt rest args ('\\' :: acc)
+  | c :: rest, args, acc =>
+    printfGoFmt rest args (c :: acc)
+
+/-- Repeat format string while arguments remain -/
+partial def printfRepeat (fmt : String) (args : List String) (acc : String) : String :=
+  if args.isEmpty then
+    let (result, _) := printfGoFmt fmt.toList [] []
+    acc ++ result
+  else
+    let (result, remaining) := printfGoFmt fmt.toList args []
+    let acc' := acc ++ result
+    if remaining.isEmpty then acc'
+    else printfRepeat fmt remaining acc'
+
 def builtinPrintf (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
   let args := match argv with
@@ -587,33 +764,10 @@ def builtinPrintf (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     | none => .inl (s, "printf: symbolic format")
     | some fmt =>
       let restStrs := rest.filterMap tryConcrete
-      -- simplified printf: handle %s, %d, \n, \t, \\, %%
-      let result := simplePrintf fmt restStrs
+      let result := printfRepeat fmt restStrs ""
       let s' := writeStdout result s
-      .inr (exitWith 0 s', .done, false)
-where
-  simplePrintf (fmt : String) (args : List String) : String :=
-    go fmt.toList args []
-  go : List Char → List String → List Char → String
-    | [], _, acc => String.ofList acc.reverse
-    | '%' :: 's' :: rest, arg :: args', acc =>
-      go rest args' (arg.toList.reverse ++ acc)
-    | '%' :: 's' :: rest, [], acc =>
-      go rest [] acc
-    | '%' :: 'd' :: rest, arg :: args', acc =>
-      go rest args' (arg.toList.reverse ++ acc)
-    | '%' :: 'd' :: rest, [], acc =>
-      go rest [] (('0' :: acc))
-    | '%' :: '%' :: rest, args, acc =>
-      go rest args ('%' :: acc)
-    | '\\' :: 'n' :: rest, args, acc =>
-      go rest args ('\n' :: acc)
-    | '\\' :: 't' :: rest, args, acc =>
-      go rest args ('\t' :: acc)
-    | '\\' :: '\\' :: rest, args, acc =>
-      go rest args ('\\' :: acc)
-    | c :: rest, args, acc =>
-      go rest args (c :: acc)
+      .inr (exitWith 0 s', .done, true)
+
 
 /-! # Getopts builtin -/
 
@@ -633,7 +787,7 @@ def builtinGetopts (s : OsState α) (argv : List SymbolicString) (_env : Env) :
       if idx > params.length then
         -- No more arguments
         let s' := checkedSetParam varname (symbolicStringOfString "?") s
-        .inr (exitWith 1 s', .done, false)
+        .inr (exitWith 1 s', .done, true)
       else
         let paramAt := params.drop (idx - 1)
         match paramAt with
@@ -799,11 +953,19 @@ def builtinExec (s : OsState α) (argv : List SymbolicString) (env : Env) :
     match tryConcrete cmdSS with
     | none => .inl (s, "exec: symbolic argument")
     | some cmd =>
-      let (s', mpath) := resolveCommandName s cmd
-      match mpath with
-      | none => .inr (failWithCode 127 ("exec: " ++ cmd ++ ": not found") s', .done, true)
-      | some path =>
-        .inr (s', .exec (symbolicStringOfString path) cmdSS (args.map id) env .noBinSh, false)
+      -- Handle common builtins inline to avoid forward-reference issues
+      match cmd with
+      | "true" | ":" => .inr (exitWith 0 s, .exit_, false)
+      | "false" => .inr (exitWith 1 s, .exit_, false)
+      | _ =>
+        -- External command
+        let (s', mpath) := resolveCommandName s cmd
+        match mpath with
+        | none => .inr (failWithCode 127 ("exec: " ++ cmd ++ ": not found") s', .done, true)
+        | some path =>
+          .inr (s', .exec (symbolicStringOfString path) cmdSS (args.map id) env .tryBinSh, false)
+
+
 
 /-! # Command builtin -/
 
@@ -822,25 +984,51 @@ def builtinCommand (s : OsState α) (argv : List SymbolicString) (env : Env) :
         match tryConcrete cmdSS with
         | none => .inl (s, "command -v: symbolic argument")
         | some cmdName =>
-          -- Check builtins first
-          if isBuiltin cmdName then
+          -- Check keywords first, then builtins, then path
+          if isShellKeyword cmdName then
+            .inr (exitWith 0 (writeStdout (cmdName ++ "\n") s), .done, false)
+          else if isBuiltin cmdName then
             .inr (exitWith 0 (writeStdout (cmdName ++ "\n") s), .done, false)
           else
             let (s', mpath) := resolveCommandName s cmdName
             match mpath with
             | none => .inr (exitWith 1 s', .done, false)
             | some path => .inr (exitWith 0 (writeStdout (path ++ "\n") s'), .done, false)
+    | some "-V" =>
+      -- command -V: verbose description
+      match rest with
+      | [] => .inr (exitWith 0 s, .done, false)
+      | cmdSS :: _ =>
+        match tryConcrete cmdSS with
+        | none => .inl (s, "command -V: symbolic argument")
+        | some cmdName =>
+          if isShellKeyword cmdName then
+            .inr (exitWith 0 (writeStdout (cmdName ++ " is a shell keyword\n") s), .done, false)
+          else if cmdName ∈ ["break", ":", "continue", ".", "eval", "exec", "exit",
+                       "export", "readonly", "return", "set", "shift", "times",
+                       "trap", "unset"] then
+            .inr (exitWith 0 (writeStdout (cmdName ++ " is a special shell builtin\n") s), .done, false)
+          else if isBuiltin cmdName then
+            .inr (exitWith 0 (writeStdout (cmdName ++ " is a shell builtin\n") s), .done, false)
+          else
+            let (s', mpath) := resolveCommandName s cmdName
+            match mpath with
+            | none => .inr (exitWith 1 (writeStderr (cmdName ++ ": not found\n") s'), .done, false)
+            | some path => .inr (exitWith 0 (writeStdout (cmdName ++ " is " ++ path ++ "\n") s'), .done, false)
+    | some "-p" =>
+      -- command -p: use default PATH — just dispatch normally for now
+      match rest with
+      | [] => .inr (exitWith 0 s, .done, false)
+      | cmdSS :: rest' =>
+        let assignsList := env.map id
+        let opts' : CommandOpts := { shouldFork := false, ranCmdSubst := false, forceSimpleCommand := true }
+        .inr (s, .commandReady assignsList cmdSS rest' [] opts', false)
     | some cmdName =>
-      -- Run command without function lookup, as simple command
-      -- Dispatch as external command (skip function and builtin lookup)
-      let (s', mpath) := resolveCommandName s cmdName
-      match mpath with
-      | none =>
-        .inl (s', cmdName ++ ": command not found")
-      | some path =>
-        let cmdSS' := symbolicStringOfString cmdName
-        let ss := symbolicStringOfString path
-        .inr (s', .exec ss cmdSS' (rest.map id) env .tryBinSh, false)
+      -- command <name>: run without function lookup, dispatching through CommandReady
+      let cmdSS := symbolicStringOfString cmdName
+      let assignsList := env.map id
+      let opts' : CommandOpts := { shouldFork := false, ranCmdSubst := false, forceSimpleCommand := true }
+      .inr (s, .commandReady assignsList cmdSS (rest.map id) [] opts', false)
 
 /-! # Local builtin -/
 
@@ -910,110 +1098,163 @@ def builtinRm (s : OsState α) (argv : List SymbolicString) (_env : Env) :
 def builtinCat (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
   match argv with
-  | [] => .inr (s, .done, false) -- TODO: read stdin
+  | [] => .inr (s, .done, false) -- TODO: read stdin?
   | _ :: args =>
-    let (s'', _ret) := args.foldl (fun (acc : OsState α × Bool) arg =>
+    let (s'', failed) := args.foldl (fun (acc : OsState α × Bool) arg =>
       let (os, failed) := acc
       match tryConcrete arg with
       | some path =>
-        match OS.osReadAllFd (fun s _ => (s, .inl (.xsSimple "read", .done))) os 0 with -- Stub stepFun
-        -- Real impl needs osReadFile which is not in class OS, usage of readAllFd with 0 is weird here
-        | (os', _) => (os', failed) -- TODO: Implement proper file reading
+        match OS.osReadFile os path with
+        | some content =>
+          (writeStdout content os, failed)
+        | none =>
+          (writeStderr ("cat: " ++ path ++ ": No such file or directory\n") os, true)
       | none => (os, true)) (s, false)
-    .inr (s'', .done, false)
+    .inr (exitWith (if failed then 1 else 0) s'', .done, false)
 
-def lookupBuiltin (name : String) : Option (OsState α → List SymbolicString → Env → Sum (OsState α × String) (OsState α × Stmt × Bool)) :=
+/-- Lookup special builtins: . : break continue eval exec exit export local
+    readonly return shift source set times trap unset
+    These are run WITHOUT push/pop of local scope (env already applied in CommandReady).
+    Return type: Sum (OsState × String) (OsState × Stmt × Bool)
+    The Bool is the 'restore' flag (whether to restore redirects). -/
+def lookupSpecialBuiltin (name : String) : Option (OsState α → List SymbolicString → Env → Sum (OsState α × String) (OsState α × Stmt × Bool)) :=
   match name with
-  | "break" => some builtinBreak
-  | ":" => some builtinColon
-  | "true" => some builtinTrue
-  | "false" => some builtinFalse
-  | "continue" => some builtinContinue
-  | "exit" => some builtinExit
-  | "return" => some builtinReturn
-  | "cd" => some builtinCd
-  | "pwd" => some builtinPwd
-  | "echo" => some builtinEcho
-  | "export" => some builtinExport
-  | "unset" => some builtinUnset
-  | "set" => some builtinSet
-  | "shift" => some builtinShift
-  | "trap" => some builtinTrap
-  | "readonly" => some builtinReadonly
-  | "alias" => some builtinAlias
-  | "unalias" => some builtinUnalias
-  | "test" | "[" => some builtinTest
-  | "type" => some builtinType
-  | "umask" => some builtinUmask
-  | "eval" => some builtinEval
   | "." | "source" => some builtinDot
-  | "wait" => some builtinWait
-  | "times" => some builtinTimes
-  | "read" => some builtinRead
-  | "printf" => some builtinPrintf
-  | "getopts" => some builtinGetopts
-  | "hash" => some builtinHash
-  | "jobs" => some builtinJobs
-  | "fg" => some builtinFg
-  | "bg" => some builtinBg
-  | "kill" => some builtinKill
+  | ":" => some builtinColon
+  | "break" => some builtinBreak
+  | "continue" => some builtinContinue
+  | "eval" => some builtinEval
   | "exec" => some builtinExec
-  | "command" => some builtinCommand
+  | "exit" => some builtinExit
+  | "export" => some builtinExport
   | "local" => some builtinLocal
-  | "history" => some builtinHistory
-  | "touch" => some builtinTouch
-  | "mkdir" => some builtinMkdir
-  | "sleep" => some builtinSleep
-  | "chmod" => some builtinChmod
-  | "ln" => some builtinLn
-  | "rm" => some builtinRm
-  | "cat" => some builtinCat
+  | "readonly" => some builtinReadonly
+  | "return" => some builtinReturn
+  | "shift" => some builtinShift
+  | "set" => some builtinSet
+  | "times" => some builtinTimes
+  | "trap" => some builtinTrap
+  | "unset" => some builtinUnset
   | _ => none
 
+/-- Lookup regular builtins: [ alias bg cd command echo false fc fg getopts
+    hash help history jobs kill printf pwd read test true type ulimit umask
+    unalias wait.
+    These are run WITH push/pop of local scope.
+    Return type: Sum (OsState × String) (OsState × Stmt)
+    Note: no Bool restore flag — always restore for regular builtins. -/
+def lookupRegularBuiltin (name : String) : Option (OsState α → List SymbolicString → Env → Sum (OsState α × String) (OsState α × Stmt)) :=
+  -- Wrap the existing builtins that return (OsState × Stmt × Bool) to strip the Bool
+  -- For now, regular builtins use the same implementations but we strip the Bool
+  let wrap (f : OsState α → List SymbolicString → Env → Sum (OsState α × String) (OsState α × Stmt × Bool)) :
+      OsState α → List SymbolicString → Env → Sum (OsState α × String) (OsState α × Stmt) :=
+    fun s argv env => match f s argv env with
+      | .inl err => .inl err
+      | .inr (s', stmt, _) => .inr (s', stmt)
+  match name with
+  | "[" | "test" => some (wrap builtinTest)
+  | "alias" => some (wrap builtinAlias)
+  | "bg" => some (wrap builtinBg)
+  | "cd" => some (wrap builtinCd)
+  | "command" => some (wrap builtinCommand)
+  | "echo" => some (wrap builtinEcho)
+  | "false" => some (wrap builtinFalse)
+  | "fg" => some (wrap builtinFg)
+  | "getopts" => some (wrap builtinGetopts)
+  | "hash" => some (wrap builtinHash)
+  | "history" => some (wrap builtinHistory)
+  | "jobs" => some (wrap builtinJobs)
+  | "kill" => some (wrap builtinKill)
+  | "printf" => some (wrap builtinPrintf)
+  | "pwd" => some (wrap builtinPwd)
+  | "read" => some (wrap builtinRead)
+  | "true" => some (wrap builtinTrue)
+  | "type" => some (wrap builtinType)
+  | "umask" => some (wrap builtinUmask)
+  | "unalias" => some (wrap builtinUnalias)
+  | "wait" => some (wrap builtinWait)
+  -- Non-standard builtins (for symbolic mode)
+  | "touch" => some (wrap builtinTouch)
+  | "mkdir" => some (wrap builtinMkdir)
+  | "sleep" => some (wrap builtinSleep)
+  | "chmod" => some (wrap builtinChmod)
+  | "ln" => some (wrap builtinLn)
+  | "rm" => some (wrap builtinRm)
+  | "cat" => some (wrap builtinCat)
+  | _ => none
 
+/-- Combined lookup for isBuiltin checks -/
+def lookupBuiltin (name : String) : Bool :=
+  (lookupSpecialBuiltin (α := α) name).isSome || (lookupRegularBuiltin (α := α) name).isSome
 
-
-
-/-- Main run_command entry point -/
-def runCommand (s : OsState α) (_opts : CommandOpts) (_check : CheckingMode) (cmdSS : SymbolicString)
-    (args : Fields) (env : Env) (_savedFds : SavedFds) :
-    EvaluationStep × OsState α × Stmt :=
-  match tryConcrete cmdSS with
-  | none => (.xsSimple "symbolic-command", s, .done)
-  | some cmdName =>
-    -- Check for function
-    match s.sh.funcs.find? (fun (n, _) => n == cmdName) with
-    | some (_, body) =>
-      let outerLoopNest := s.sh.loopNest
-      let outerParams := s.sh.positionalParams
-      let newParams := cmdSS :: args.map (fun ss => ss)
-      let s' := { s with sh := { s.sh with
-        positionalParams := newParams,
-        loopNest := 0,
-        locals := [] :: s.sh.locals } }
-      (.xsSimple "function-call", s', .call outerLoopNest outerParams cmdName body body)
+/-- Main run_command entry point.
+    Follows OCaml's 4-step dispatch:
+    1. Special builtin lookup → run directly (no local scope)
+    2. Function lookup (unless forceSimpleCommand) → pushLocals, setFunctionParams, return .call
+    3. Regular builtin lookup → pushLocals, run, popLocals
+    4. External command → checkExecve → fork/exec
+    Returns: (EvaluationStep, OsState, Stmt, Bool)
+    The Bool 'restore' flag indicates whether to restore redirects via pushredir. -/
+def runCommand (s : OsState α) (opts : CommandOpts) (checked : CheckingMode) (progName : SymbolicString)
+    (argv : Fields) (env : Env) (savedFds : SavedFds) :
+    Sum (OsState α × String) (OsState α × Stmt × Bool) :=
+  match tryConcrete progName with
+  | none => .inl (s, "can't run symbolic command")
+  | some prog =>
+    -- Step 1: Special builtin lookup
+    match lookupSpecialBuiltin prog with
+    | some fn =>
+      -- No local scope push for special builtins.
+      -- Env was already applied in CommandReady.
+      let fullArgv := progName :: argv
+      fn s fullArgv env
     | none =>
-      -- Check for builtin
-      match lookupBuiltin cmdName with
-      | some builtin =>
-        let argv := cmdSS :: args.map id
-        match builtin s argv env with
-        | .inl (s', err) =>
-          let s'' := failWith (cmdName ++ ": " ++ err) s'
-          (.xsSimple "builtin-error", s'', .done)
-        | .inr (s', cont, _isSpecial) =>
-          (.xsSimple "builtin", s', cont)
-      | none =>
-        -- External command
-        let (s', mpath) := resolveCommandName s cmdName
-        match mpath with
+      -- Step 2: Function lookup (unless forceSimpleCommand)
+      match (opts.forceSimpleCommand, lookupFunction s prog) with
+      | (false, some body) =>
+        let s2 := pushLocals s env
+        let s3 := setFunctionParams 0 argv s2
+        .inr (s3, .call s.sh.loopNest (getFunctionParams s) prog body body, true)
+      | _ =>
+        -- Step 3: Regular builtin lookup
+        match lookupRegularBuiltin prog with
+        | some fn =>
+          let s2 := pushLocals s env
+          let fullArgv := progName :: argv
+          match fn s2 fullArgv env with
+          | .inl (s2', err) =>
+            let (s3, _) := popLocals s2'
+            .inl (s3, err)
+          | .inr (s2', stmt1) =>
+            -- Compute restore flag (false only for 'exec' without args special case)
+            let restore := match stmt1 with
+              | .commandReady _ cmd [] [] _ =>
+                match tryConcrete cmd with
+                | some "exec" => false
+                | _ => true
+              | _ => true
+            let (s3, _) := popLocals s2'
+            .inr (s3, stmt1, restore)
         | none =>
-          (.xsSimple "not-found", failWithCode 127 (cmdName ++ ": command not found") s', .done)
-        | some path =>
-          -- Simulate execution by updating state and returning done
-          -- (returning .exec would cause infinite recursion with Semantics stepEval)
-          let s'' := OS.osExecve s' (symbolicStringOfString path)
-          (.xsSimple "exec", s'', .done)
+          -- Step 4: External command
+          let (s1, mpath) := resolveCommandName s prog
+          match mpath with
+          | none =>
+            -- Command not found: write error and set exit code 127
+            let s2 := writeStderr (prog ++ ": command not found\n") s1
+            .inr (exitWith 127 s2, .done, true)
+          | some executable =>
+            let cmd1 := symbolicStringOfString executable
+            let exported := getEnv s1
+            let execEnv := env.foldl (fun acc (k, v) => (k, v) :: acc.filter (fun (k', _) => k' != k)) exported
+            let exec := Stmt.exec cmd1 progName argv execEnv .tryBinSh
+            if opts.shouldFork then
+              let (s2, pid) := OS.osForkAndSubshell s1 exec .fg none true
+              let stmtForJob := Stmt.commandExpRedirs [] (progName :: argv) ([], none, []) defaultCmdOpts
+              let (s3, _) := addJob s2 [(pid, stmtForJob)] pid stmtForJob .fg .jobRunning
+              .inr (s3, .wait pid checked none .waitInternal, true)
+            else
+              .inr (s1, exec, true)
 
 instance [OS α] : Shell α where
   runCommand := runCommand

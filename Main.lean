@@ -7,17 +7,26 @@ import Smoosh.FromJson
 
 /-! # Symbolic stepper -/
 
-/-- Run the shell state machine to completion -/
-partial def runToCompletion (os : OsState Symbolic) (stmt : Stmt) (maxSteps : Nat := 500000) : OsState Symbolic :=
+/-- Run full_evaluation: step until Done (matching OCaml's full_evaluation) -/
+partial def fullEvaluation (os : OsState Symbolic) (stmt : Stmt) (maxSteps : Nat := 500000) : OsState Symbolic :=
   match maxSteps with
   | 0 => os
   | n + 1 =>
     match stmt with
     | .done => os
-    | .exit_ => os
     | _ =>
-      let (_, os', stmt') := stepEval os stmt
-      runToCompletion os' stmt' n
+      -- OCaml: eval calls tick before stepping (clears stepped flags, decrements fuel)
+      let os0 := OS.osTick os
+      let (_step, os', stmt') := stepEval os0 stmt
+      fullEvaluation os' stmt' n
+
+/-- Run the shell to completion, matching OCaml's eval function:
+    1. Run full_evaluation on the statement until Done
+    2. Run full_evaluation on Exit to process exit traps -/
+partial def runToCompletion (os : OsState Symbolic) (stmt : Stmt) (maxSteps : Nat := 500000) : OsState Symbolic :=
+  let os1 := fullEvaluation os stmt maxSteps
+  let os2 := fullEvaluation os1 .exit_ maxSteps
+  os2
 
 /-! # Test runner -/
 

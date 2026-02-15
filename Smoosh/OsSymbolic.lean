@@ -44,6 +44,9 @@ def symbolicFsResolveNode (fs : SymbolicFs) (path : String) : Option SymbolicFs 
   traverse fs comps
 
 def symbolicFsWrite (fs : SymbolicFs) (path : String) (content : String) (append : Bool) : Option SymbolicFs :=
+  if path == "/dev/full" then none
+  else if path == "/dev/null" then some fs
+  else
   let comps := splitStringOn false '/' path
   let rec update (fs : SymbolicFs) (comps : List String) : Option SymbolicFs :=
     match comps with
@@ -192,17 +195,120 @@ def symbolicFdsReadsFifo (fifoNum : FifoNum) (fds : Fds) : Bool :=
     | _ => false)
 
 def symbolicFdsWritesFifo (fifoNum : FifoNum) (fds : Fds) : Bool :=
-  fds.any (fun (_, tgt) =>
+  fds.any (fun (fd, tgt) =>
     match tgt with
-    | .fifo n => n == fifoNum
+    | .fifo n => fd != STDIN && n == fifoNum
     | _ => false)
+
+def countOpenFifo (sym : Symbolic) (fifoNum : FifoNum) : Nat :=
+  let shCount := sym.shFds.foldl (fun acc (_, tgt) =>
+    match tgt with | .fifo n => if n == fifoNum then acc + 1 else acc | _ => acc) 0
+  let procCount := sym.procs.foldl (fun acc proc =>
+    match proc with
+    | .shell _ _ _ fds _ _ =>
+      acc + fds.foldl (fun acc2 (_, tgt) =>
+        match tgt with | .fifo n => if n == fifoNum then acc2 + 1 else acc2 | _ => acc2) 0
+    | _ => acc) 0
+  shCount + procCount
+
+def stepWorld (stepFun : StepFun Symbolic) (os : OsState Symbolic) : OsState Symbolic × Bool :=
+  let rec loop (pid : Nat) (os : OsState Symbolic) (progress : Bool) : OsState Symbolic × Bool :=
+    if pid >= os.symbolic.procs.length then (os, progress)
+    else
+      match listGet? os.symbolic.procs pid with
+      | some (.shell .procRunning stmt sh fds stepped pending) =>
+        let childOs : OsState Symbolic :=
+             { os with sh := sh,
+                       symbolic := { os.symbolic with shFds := fds, curpid := pid } }
+        let (childOs', res) := stepFun childOs stmt
+        match res with
+        | .inl (step, stmt') =>
+           let newProc := Proc.shell .procRunning stmt' childOs'.sh childOs'.symbolic.shFds (.stepped true) pending
+           let procs' := match adjustNth os.symbolic.procs pid (fun _ => (newProc, ())) with | some (p, _) => p | none => os.symbolic.procs
+           let sym' := { os.symbolic with
+                         fifos := childOs'.symbolic.fifos,
+                         fsRoot := childOs'.symbolic.fsRoot,
+                         procs := procs' }
+           let os' := { os with symbolic := sym' }
+           (os', true)
+        | .inr (some ec) =>
+           let newProc := Proc.zombie ec
+           let procs' := match adjustNth os.symbolic.procs pid (fun _ => (newProc, ())) with | some (p, _) => p | none => os.symbolic.procs
+           let sym' := { os.symbolic with fifos := childOs'.symbolic.fifos, fsRoot := childOs'.symbolic.fsRoot, procs := procs' }
+           ({ os with symbolic := sym' }, true)
+         | .inr none =>
+           loop (pid + 1) os progress
+      | _ => loop (pid + 1) os progress
+  loop 0 os false
+
+partial def blockingReadAllFd (stepFun : StepFun Symbolic) (os : OsState Symbolic) (fifoNum : FifoNum) (acc : String) : OsState Symbolic × Option String :=
+  match readAllFifo os.symbolic fifoNum with
+  | some (sym', data) =>
+    let os' := { os with symbolic := sym' }
+    let newAcc := acc ++ data
+    if data != "" then
+      blockingReadAllFd stepFun os' fifoNum newAcc
+    else
+      if countOpenFifo os'.symbolic fifoNum > 1 then
+        let (os'', progress) := stepWorld stepFun os'
+        if progress then blockingReadAllFd stepFun os'' fifoNum newAcc
+        else (os'', some newAcc)
+      else
+        (os', some newAcc)
+  | none => (os, some acc)
 
 def symbolicWritesFifo (fifoNum : FifoNum) : Proc → Bool
   | .zombie _ => false
   | .shell _ _ _ fds _ _ => symbolicFdsWritesFifo fifoNum fds
 
+/-- OCaml: symbolic_has_reader — check if any OTHER process (not curpid) reads this FIFO.
+    STDOUT (fifo 1) and STDERR (fifo 2) always have readers. -/
+def symbolicHasReader (os : OsState Symbolic) (fifoNum : FifoNum) : Bool :=
+  fifoNum == 1 || fifoNum == 2 ||
+  -- enumerate procs with their index (pid)
+  let rec go (pid : Nat) (procs : List Proc) : Bool :=
+    match procs with
+    | [] => false
+    | proc :: rest =>
+      let isMatch := pid != os.symbolic.curpid &&
+        match proc with
+        | .shell _ _ _ fds _ _ => symbolicFdsReadsFifo fifoNum fds
+        | .zombie _ => false
+      if isMatch then true else go (pid + 1) rest
+  go 0 os.symbolic.procs
+
+/-- OCaml: symbolic_find_writer — find pids of processes (other than curpid) writing to FIFO -/
+def symbolicFindWriter (os : OsState Symbolic) (fifoNum : FifoNum) : List Pid :=
+  let rec go (pid : Nat) (procs : List Proc) (acc : List Pid) : List Pid :=
+    match procs with
+    | [] => acc.reverse
+    | proc :: rest =>
+      if pid != os.symbolic.curpid && symbolicWritesFifo fifoNum proc
+      then go (pid + 1) rest (pid :: acc)
+      else go (pid + 1) rest acc
+  go 0 os.symbolic.procs []
+
+/-- OCaml: string_read_line_cl — read characters until newline, handling escapes -/
+def stringReadLineCl : List Char → EscapeMode → List Char → List Char × List Char × ReadEof
+  -- EOF
+  | [], _, line => (line, [], .hitEof)
+  -- newline terminates
+  | '\n' :: cs', _, line => (line, cs', .noEof)
+  -- backslash escapes
+  | ['\\'], .escapeOn, line => ('\\' :: line, [], .hitEof)
+  | '\\' :: '\n' :: cs, .escapeOn, line => stringReadLineCl cs .escapeOn line
+  | '\\' :: c :: cs, .escapeOn, line => stringReadLineCl cs .escapeOn (c :: line)
+  -- ordinary char
+  | c :: cs, esc, line => stringReadLineCl cs esc (c :: line)
+
+/-- OCaml: string_read_line — read a line from string, returning (line, rest, eof) -/
+def stringReadLine (s : String) (escapes : EscapeMode) : String × String × ReadEof :=
+  let (lineCs, rest, eof) := stringReadLineCl s.toList escapes []
+  (String.ofList lineCs.reverse, String.ofList rest, eof)
+
 /-! # Symbolic write/read -/
 
+/-- OCaml: symbolic_write_fd — write to FD, send SIGPIPE if no readers -/
 def symbolicWriteFd (os : OsState Symbolic) (fd : Fd) (s : String) : Option (OsState Symbolic) :=
   match symbolicResolveFd os.symbolic fd with
   | none => none
@@ -210,7 +316,21 @@ def symbolicWriteFd (os : OsState Symbolic) (fd : Fd) (s : String) : Option (OsS
     match adjustNth os.symbolic.fifos fifoNum (fun contents => (contents ++ s, ())) with
     | none => none
     | some (newFifos, ()) =>
-      some { os with symbolic := { os.symbolic with fifos := newFifos } }
+      let os' := { os with symbolic := { os.symbolic with fifos := newFifos } }
+      -- OCaml: check if there are still readers for this FIFO
+      if symbolicHasReader os' fifoNum
+      then some os'
+      else
+        -- No readers: send SIGPIPE to current process
+        -- OCaml: symbolic_signal_pid os SIGPIPE os.symbolic.curpid SignalProcess
+        -- Simplified: just append SIGPIPE to current process pending signals
+        let pid := os'.symbolic.curpid
+        match listGet? os'.symbolic.procs pid with
+        | some (.shell status stmt sh fds stepped pending) =>
+          let newProc := Proc.shell status stmt sh fds stepped (pending ++ [.SIGPIPE])
+          let procs' := os'.symbolic.procs.set pid newProc
+          some { os' with symbolic := { os'.symbolic with procs := procs' } }
+        | _ => some os'  -- zombie or not found, just succeed
   | some (.path p) =>
     match symbolicFsWrite os.symbolic.fsRoot p s true with
     | none => none
@@ -230,7 +350,8 @@ def defaultSymbolic : Symbolic :=
     shFds := [(0, .fifo 0), (1, .fifo 1), (2, .fifo 2)],
     fsRoot := .fsDir [],
     fifos := ["", "", ""],  -- stdin, stdout, stderr
-    procs := [],
+    -- OCaml: procs starts with [Shell(Proc_Running, Done, default_shell_state, fds_default, ...)]
+    procs := [Proc.shell .procRunning .done defaultShellState [(0, .fifo 0), (1, .fifo 1), (2, .fifo 2)] (.stepped false) []],
     umask := defaultUmask,
     curpid := 0 }
 
@@ -241,20 +362,31 @@ instance : OS Symbolic where
       fuel := none,
       log := [] }
 
-  osTick os := os
+  osTick os :=
+    -- OCaml: symbolic_clear_stepped — reset stepped flag on all processes
+    -- Optimization: skip if only parent process (no children to clear)
+    if os.symbolic.procs.length ≤ 1 then os
+    else
+    { os with symbolic :=
+      { os.symbolic with procs := os.symbolic.procs.map (fun proc =>
+          match proc with
+          | .zombie _ => proc
+          | .shell status stmt sh fds _stepped pending =>
+            .shell status stmt sh fds (.stepped false) pending) } }
   osSetPs1 os _v := os
   osSetPs2 os _v := os
   osExecve os _cmd := os
   osForkAndSubshell os stmt _bg _pgid _last :=
     let newPid := os.symbolic.procs.length
-    let newProc := Proc.shell .procRunning stmt os.sh os.symbolic.shFds (.stepped false) []
+    -- OCaml: prepare_subshell clears traps, resets loop_nest/jobs/outermost
+    let subOs := prepareSubshell os
+    let newProc := Proc.shell .procRunning stmt subOs.sh os.symbolic.shFds (.stepped false) []
     let os' := { os with symbolic :=
       { os.symbolic with
-        procs := os.symbolic.procs ++ [newProc],
-        curpid := newPid } }
+        procs := os.symbolic.procs ++ [newProc] } }
     (os', newPid)
 
-  osExit os := os
+  osExit os := procSetEc os os.symbolic.curpid os.sh.exitCode
 
   osGetpwnam os user :=
     match os.symbolic.passwd.find? (fun (u, _) => u == user) with
@@ -262,48 +394,108 @@ instance : OS Symbolic where
     | none => none
 
   osWaitpid stepFun os pid :=
-    match findJobWithPid os pid with
-    | some job =>
-      -- If job is already done, return exit code
-      match ecOfJobStatus job.status with
-      | some ec => (deleteJob os job.id, some (.inr ec))
-      | none => (os, none)
-    | none =>
-      match listGet? os.symbolic.procs pid with
-      | some (Proc.zombie ec) => (os, some (.inr ec))
-      | some (.shell status stmt sh fds stepped pending) =>
-        -- construct child OS
+    -- OCaml: symbolic_step_pid uses proc_select directly (no job table check)
+    -- The job table check is done by waitpid_or_lookup/wait_for_pid in Os.lean
+      -- OCaml: proc_select saves current state, then swaps to target pid
+      let os1 := procSaveState os
+      match listGet? os1.symbolic.procs pid with
+      | some (Proc.zombie ec) => (os1, some (.inr ec))
+      | some (.shell .procStopped _ _ _ _ _) => (os1, none)
+      | some (.shell .procRunning stmt _sh _fds (.stepped true) _pending) =>
+        -- Already stepped this tick, return step info
+        (os1, some (.inl (.xsNested (.xsSimple "already stepped") (.xsProc pid stmt))))
+      | some (.shell .procRunning stmt sh fds (.stepped false) pending) =>
+        -- Switch to child context: swap sh + shFds + curpid
+        -- This is the OCaml proc_select pattern: shared FIFOs!
+        let os2 := procSaveState os1  -- save parent state into proc table
         let childOs : OsState Symbolic :=
-          { sh := sh, symbolic := { os.symbolic with shFds := fds }, fuel := os.fuel, log := os.log }
+          { os2 with sh := sh,
+                     symbolic := { os2.symbolic with shFds := fds, curpid := pid } }
 
-        -- step child
+        -- Step the child (using shared FIFO state)
         let (childOs', res) := stepFun childOs stmt
 
-        -- recover updated state
-        let (newStmt, newStatus, newEc, res') : Stmt × ProcStatus × Option Nat × Option (Sum EvaluationStep Nat) :=
-          match res with
-          | .inl (step, nextStmt) => (nextStmt, status, none, some (.inl step))
-          | .inr (some ec) => (stmt, ProcStatus.procStopped, some ec, some (.inr ec))
-          | .inr none => (stmt, status, none, some (.inl (EvaluationStep.xsSimple "stuck")))
-
-        -- If exited, update to zombie
-        match newEc with
-        | some ec =>
-          let procs' := os.symbolic.procs.set pid (Proc.zombie ec)
-          ({ os with symbolic := { os.symbolic with procs := procs' } }, res')
-        | none =>
-          let newProc := Proc.shell newStatus newStmt childOs'.sh childOs'.symbolic.shFds stepped pending
-          let procs' := os.symbolic.procs.set pid newProc
-          let logDiff := childOs'.log.take (childOs'.log.length - os.log.length)
-          let os' := { os with log := logDiff ++ os.log, symbolic := { os.symbolic with procs := procs' } }
-          (os', res')
-      | _ => (os, none)
+        match res with
+        | .inl (step, stmt') =>
+          -- Child took a step, still running
+          -- Save child state back into proc table
+          let os3 : OsState Symbolic :=
+            match adjustNth childOs'.symbolic.procs pid (fun _ =>
+              (Proc.shell .procRunning stmt' childOs'.sh childOs'.symbolic.shFds (.stepped true) pending, ())) with
+            | some (procs', ()) => { childOs' with symbolic := { childOs'.symbolic with procs := procs' } }
+            | none => childOs'
+          -- Restore parent context
+          match listGet? os3.symbolic.procs os.symbolic.curpid with
+          | some (.shell _ _ parentSh parentFds _ _) =>
+            let sym' := { os3.symbolic with shFds := parentFds, curpid := os.symbolic.curpid }
+            ({ os3 with sh := parentSh, symbolic := sym' }, some (.inl (.xsNested step (.xsProc pid stmt'))))
+          | _ =>
+            let sym' := { os3.symbolic with shFds := os.symbolic.shFds, curpid := os.symbolic.curpid }
+            ({ os3 with sh := os.sh, symbolic := sym' }, some (.inl (.xsNested step (.xsProc pid stmt'))))
+        | .inr (some ec) =>
+          -- Child exited: check for EXIT trap before zombifying (OCaml: symbolic_step_pid)
+          let (childOs2, trapOpt) := exitTrap childOs'
+          match trapOpt with
+          | some handler =>
+            -- EXIT trap exists: keep process running with handler, then exit
+            let sHandler := stringOfSymbolicString handler
+            let handlerCmd := Stmt.evalLoop 1 (none, none) (.parseString .parseTrap sHandler) .noninteractive .subsidiary
+            let exitStmt := Stmt.semi handlerCmd .exit_
+            -- Save child state back into proc table with handler as new statement
+            let os3 : OsState Symbolic :=
+              match adjustNth childOs2.symbolic.procs pid (fun _ =>
+                (Proc.shell .procRunning exitStmt childOs2.sh childOs2.symbolic.shFds (.stepped true) pending, ())) with
+              | some (procs', ()) => { childOs2 with symbolic := { childOs2.symbolic with procs := procs' } }
+              | none => childOs2
+            -- Restore parent context
+            match listGet? os3.symbolic.procs os.symbolic.curpid with
+            | some (.shell _ _ parentSh parentFds _ _) =>
+              let sym' := { os3.symbolic with shFds := parentFds, curpid := os.symbolic.curpid }
+              ({ os3 with sh := parentSh, symbolic := sym' },
+                some (.inl (.xsNested (.xsSimple "trapped on EXIT") (.xsProc pid exitStmt))))
+            | _ =>
+              let sym' := { os3.symbolic with shFds := os.symbolic.shFds, curpid := os.symbolic.curpid }
+              ({ os3 with sh := os.sh, symbolic := sym' },
+                some (.inl (.xsNested (.xsSimple "trapped on EXIT") (.xsProc pid exitStmt))))
+          | none =>
+            -- No EXIT trap: zombie the process
+            let os3 := procSetEc childOs' pid ec
+            -- Restore parent context
+            match listGet? os3.symbolic.procs os.symbolic.curpid with
+            | some (.shell _ _ parentSh parentFds _ _) =>
+              let sym' := { os3.symbolic with shFds := parentFds, curpid := os.symbolic.curpid }
+              ({ os3 with sh := parentSh, symbolic := sym' }, some (.inr ec))
+            | _ =>
+              let sym' := { os3.symbolic with shFds := os.symbolic.shFds, curpid := os.symbolic.curpid }
+              ({ os3 with sh := os.sh, symbolic := sym' }, some (.inr ec))
+        | .inr none =>
+          -- Child is stuck
+          (os1, some (.inl (.xsSimple "stuck")))
+      | _ => (os1, none)
 
   osWaitchild os := (os, none)
 
   osHandleSignal os _sig _handler := os
-  osSignalPid os _sig _pid _asPg := (os, false)
-  osPendingSignal os := (os, none)
+  osSignalPid os sig pid _asPg :=
+    -- OCaml: find proc by pid, append sig to pending
+    -- Note: OCaml uses mutable queue/list. We append to end? Or push to front?
+    -- OCaml `post_signal`: `p.pending <- p.pending @ [s]`
+    match listGet? os.symbolic.procs pid with
+    | some (.shell status stmt sh fds stepped pending) =>
+      let newProc := Proc.shell status stmt sh fds stepped (pending ++ [sig])
+      let procs' := os.symbolic.procs.set pid newProc
+      ({ os with symbolic := { os.symbolic with procs := procs' } }, true)
+    | _ => (os, false)
+
+  osPendingSignal os :=
+    -- OCaml: check current process pending list, pop head
+    let pid := os.symbolic.curpid
+    match listGet? os.symbolic.procs pid with
+    | some (.shell status stmt sh fds stepped (sig :: rest)) =>
+      let newProc := Proc.shell status stmt sh fds stepped rest
+      let procs' := os.symbolic.procs.set pid newProc
+      ({ os with symbolic := { os.symbolic with procs := procs' } }, some sig)
+    | _ => (os, none)
 
   osTcSetfg os _pid := (os, false)
   osSetJobControl os _on := os
@@ -316,9 +508,23 @@ instance : OS Symbolic where
   osPhysicalCwd os := os.sh.cwd
 
   osChdir os path :=
-    ({ os with sh := { os.sh with cwd := path } }, none)
+    -- OCaml: symbolic_chdir checks if path resolves to a directory
+    match symbolicFsResolvePath os.symbolic.fsRoot path with
+    | some (.dir _) | some .file =>
+      -- Accept any existing path (OCaml is lenient in symbolic mode)
+      ({ os with sh := { os.sh with cwd := path } }, none)
+    | none =>
+      -- Path doesn't exist, but symbolic mode is lenient — just update cwd
+      -- OCaml actually succeeds here too for symbolic mode
+      ({ os with sh := { os.sh with cwd := path } }, none)
 
-  osReaddir _os _path := []
+  osReaddir os path :=
+    match symbolicFsResolveNode os.symbolic.fsRoot path with
+    | some (.fsDir entries) => entries.map (fun (name, node) =>
+        match node with
+        | .fsFile _ _ _ => (name, .file)
+        | .fsDir _ => (name, .dir name))
+    | _ => []
   osFileExists os path :=
     match symbolicFsResolvePath os.symbolic.fsRoot path with
     | some _ => true
@@ -349,54 +555,87 @@ instance : OS Symbolic where
     | some (.fsDir _) => some 0.0
     | none => none
   osFileNumber os path := none
-  osIsTty _os _fd := false
-  osIsReadable _os _path := false
-  osIsWriteable _os _path := false
-  osIsExecutable _os _path := false
+  osIsTty os fd :=
+    match symbolicResolveFd os.symbolic fd with
+    | some (.fifo fifoNum) =>
+      (fifoNum == STDIN || fifoNum == STDOUT || fifoNum == STDERR) && isInteractive os
+    | _ => false
+  osIsReadable os path :=
+    match symbolicFsResolvePath os.symbolic.fsRoot path with
+    | some _ => true
+    | none => false
+  osIsWriteable os path :=
+    match symbolicFsResolvePath os.symbolic.fsRoot path with
+    | some _ => true
+    | none => false
+  osIsExecutable os path :=
+    match symbolicFsResolvePath os.symbolic.fsRoot path with
+    | some _ => true
+    | none => false
+
+  osReadFile os path :=
+    match symbolicFsResolveNode os.symbolic.fsRoot path with
+    | some (.fsFile content _ _) => some content
+    | _ => none
 
   osWriteFd os fd s := symbolicWriteFd os fd s
 
-  osReadAllFd _stepFun os fd :=
+  osReadAllFd stepFun os fd :=
     match symbolicResolveFd os.symbolic fd with
     | none => (os, .inr none)
     | some (.fifo fifoNum) =>
-      match readAllFifo os.symbolic fifoNum with
-      | none => (os, .inr none)
-      | some (sym', s) => ({ os with symbolic := sym' }, .inr (some s))
+      let (os', res) := blockingReadAllFd stepFun os fifoNum ""
+      (os', .inr res)
     | some (.path _) => (os, .inr none)
 
 
-  osReadLineFd os _fd _escMode := (os, ("", "", .hitEof))
+  osReadLineFd os fd escMode :=
+    match symbolicResolveFd os.symbolic fd with
+    | some (.fifo fifoNum) =>
+      match listGet? os.symbolic.fifos fifoNum with
+      | none => (os, ("", "", .hitEof))  -- broken pipe
+      | some cts =>
+        let (line, cts', eofFlag) := stringReadLine cts escMode
+        let commitRead :=
+          let newFifos := os.symbolic.fifos.set fifoNum cts'
+          ({ os with symbolic := { os.symbolic with fifos := newFifos } },
+           (line, "", eofFlag))
+        if eofFlag == .noEof then
+          commitRead
+        else
+          -- EOF: check if someone is still writing to this FIFO
+          match symbolicFindWriter os fifoNum with
+          | [] => commitRead  -- no writer, return EOF
+          | _ => (os, ("", "", .hitEof))  -- writer exists, block (simplified: return EOF)
+    | some (.path _) => (os, ("", "", .hitEof))
+    | none => (os, ("", "", .hitEof))
 
   osCloseFd os fd :=
     { os with symbolic :=
       { os.symbolic with shFds := os.symbolic.shFds.filter (fun (f, _) => f != fd) } }
 
   osPipe os :=
-    let r := symbolicFreshFd os.symbolic.shFds
-    let w := r + 1
+    -- OCaml: mkfifo, then allocate read FD, then allocate write FD from updated map
     let newFifo := ""
     let fifoIdx := os.symbolic.fifos.length
-    let sym' := { os.symbolic with
-      shFds := os.symbolic.shFds ++ [(r, .fifo fifoIdx), (w, .fifo fifoIdx)],
-      fifos := os.symbolic.fifos ++ [newFifo] }
-    .inr ({ os with symbolic := sym' }, r, w)
+    let sym1 := { os.symbolic with fifos := os.symbolic.fifos ++ [newFifo] }
+    -- Allocate read FD
+    let fdRead := symbolicFreshFd sym1.shFds
+    let fds1 := sym1.shFds ++ [(fdRead, .fifo fifoIdx)]
+    -- Allocate write FD from updated map
+    let fdWrite := symbolicFreshFd fds1
+    let fds2 := fds1 ++ [(fdWrite, .fifo fifoIdx)]
+    let sym2 := { sym1 with shFds := fds2 }
+    .inr ({ os with symbolic := sym2 }, fdRead, fdWrite)
 
   osOpenFileForRedir os _ty ss :=
-    match tryConcrete ss with
-    | none => (os, .inl "symbolic: open_file_for_redir: non-concrete path")
-    | some path =>
-      -- If writing, create empty file or truncate
-      let fs' := match symbolicFsWrite os.symbolic.fsRoot path "" false with
-        | some fs => fs
-        | none => os.symbolic.fsRoot -- Ignore failure? or fail?
-      -- For now, just proceed with updated FS (or same if failed)
-      -- Allocate FD
-      let fd := symbolicFreshFd os.symbolic.shFds
-      let sym' := { os.symbolic with
-        fsRoot := fs',
-        shFds := os.symbolic.shFds ++ [(fd, .path path)] }
-      ( { os with symbolic := sym' }, .inr fd )
+    -- OCaml: always succeeds, just allocates a Path FD.
+    -- Does NOT check if file exists or try to create it.
+    let fd := symbolicFreshFd os.symbolic.shFds
+    let (_, _, sfile) := concretize os ss
+    let sym' := { os.symbolic with
+      shFds := os.symbolic.shFds ++ [(fd, .path sfile)] }
+    ( { os with symbolic := sym' }, .inr fd )
   osOpenHeredoc os s :=
     let fifoIdx := os.symbolic.fifos.length
     let fd := symbolicFreshFd os.symbolic.shFds
@@ -406,38 +645,49 @@ instance : OS Symbolic where
     .inr ({ os with symbolic := sym' }, fd)
 
   osCloseAndSaveFd os fd :=
-    match os.symbolic.shFds.find? (fun (f, _) => f == fd) with
-    | none => (os, .inl s!"bad fd {fd}")
-    | some (_, _tgt) =>
-      let os' := { os with symbolic :=
-        { os.symbolic with shFds := os.symbolic.shFds.filter (fun (f, _) => f != fd) } }
-      (os', .inr [(fd, .inl fd)])
+    -- OCaml: close the fd and save its FIFO target for later restoration
+    let sym := os.symbolic
+    match sym.shFds.find? (fun (f, _) => f == fd) with
+    | none =>
+      -- Already closed: save a close marker so restore will close it if reopened
+      -- OCaml returns Right [(fd, Saved_close)] to ensure fd is closed on restore
+      let os' := { os with symbolic := { sym with shFds := sym.shFds.filter (fun (f, _) => f != fd) } }
+      (os', .inr [(fd, .inr ())])
+    | some (_, .fifo fifoNum) =>
+      -- Save the FIFO number (OCaml: Saved fifo_num)
+      let os' := { os with symbolic := { sym with shFds := sym.shFds.filter (fun (f, _) => f != fd) } }
+      (os', .inr [(fd, .inl fifoNum)])
+    | some (_, .path _) =>
+      -- OCaml: Left "TODO 2018-08-24 symbolic path FDs unimplemented"
+      let os' := { os with symbolic := { sym with shFds := sym.shFds.filter (fun (f, _) => f != fd) } }
+      (os', .inl "TODO symbolic path FDs unimplemented")
 
   osRenumberFd os action origFd wantedFd :=
-    let saved := os.symbolic.shFds.find? (fun (f, _) => f == wantedFd)
-    let savedInfo : SavedFds := match saved with
-      | none => [(wantedFd, .inr ())]
-      | some (_, _) => [(wantedFd, .inl wantedFd)]
-    let origTgt := os.symbolic.shFds.find? (fun (f, _) => f == origFd)
-    match origTgt with
-    | none => (os, .inl s!"bad fd {origFd}")
-    | some (_, tgt) =>
-      let fds' := os.symbolic.shFds.filter (fun (f, _) => f != wantedFd)
-      let fds'' := if action.shouldClose then fds'.filter (fun (f, _) => f != origFd) else fds'
-      let fds''' := (wantedFd, tgt) :: fds''
-      let os' := { os with symbolic := { os.symbolic with shFds := fds''' } }
-      (os', .inr savedInfo)
+    -- OCaml: if origFd == wantedFd, just return close info if needed
+    if origFd == wantedFd then
+      let savedInfo : SavedFds := if action.shouldClose then [(wantedFd, .inr ())] else []
+      (os, .inr savedInfo)
+    else
+      match os.symbolic.shFds.find? (fun (f, _) => f == origFd) with
+      | none => (os, .inl "broken pipe (tried to renumber closed fd)")
+      | some (_, newTgt) =>
+        -- Save existing wanted_fd target if present
+        let saved : SavedFds := match os.symbolic.shFds.find? (fun (f, _) => f == wantedFd) with
+          | none => []  -- wanted_fd is free
+          | some (_, .fifo fifoNum) => [(wantedFd, .inl fifoNum)]
+          | some (_, .path _) => []  -- TODO: path FDs
+        -- Install the new FD and optionally close the original
+        let fds0 := (wantedFd, newTgt) :: os.symbolic.shFds.filter (fun (f, _) => f != wantedFd)
+        let fds1 := if action.shouldClose then fds0.filter (fun (f, _) => f != origFd) else fds0
+        let os' := { os with symbolic := { os.symbolic with shFds := fds1 } }
+        (os', .inr saved)
 
   osRestoreFd os fd info :=
     match info with
-    | .inl savedFd =>
-      -- restore the saved fd
-      let origTgt := os.symbolic.shFds.find? (fun (f, _) => f == savedFd)
-      match origTgt with
-      | none => os
-      | some (_, tgt) =>
-        let fds' := os.symbolic.shFds.filter (fun (f, _) => f != fd)
-        { os with symbolic := { os.symbolic with shFds := (fd, tgt) :: fds' } }
+    | .inl fifoNum =>
+      -- Restore: create a fresh FD entry pointing to the saved FIFO
+      let fds' := (fd, .fifo fifoNum) :: os.symbolic.shFds.filter (fun (f, _) => f != fd)
+      { os with symbolic := { os.symbolic with shFds := fds' } }
     | .inr () =>
-      -- close the fd
+      -- Close: remove the fd
       { os with symbolic := { os.symbolic with shFds := os.symbolic.shFds.filter (fun (f, _) => f != fd) } }
