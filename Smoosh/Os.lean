@@ -214,7 +214,7 @@ def setLocalParam (x : String) (v : Option SymbolicString) (opts : LocalOpts) (o
 /-- Unset a variable, checking local scopes first (OCaml: unset_param) -/
 def unsetParam (x : String) (os : OsState α) : Except String (OsState α) :=
   if os.sh.readonly.any (· == x) then
-    .error s!"smoosh: unset: {x}: readonly variable"
+    .error s!"{x} is read-only"
   else
     let (os1, foundLocal) := setLocalParamBool os x none
     if foundLocal then .ok os1
@@ -301,7 +301,7 @@ def jobStatusOfEc (ec : Nat) : JobStatus :=
 
 def checkParam (x : String) (os : OsState α) : Option String :=
   if os.sh.readonly.any (· == x) then
-    some s!"{x}: readonly variable"
+    some s!"{x}: is read only"
   else none
 
 def updateTrap (sig : Signal) (handler : Option SymbolicString) (os : OsState α) : OsState α :=

@@ -611,10 +611,33 @@ def builtinUmask (s : OsState α) (argv : List SymbolicString) (_env : Env) :
 
 def builtinDot (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  let args := match argv with | [] => [] | _ :: rest => rest
+  -- argv[0] is the program name (. or source), argv[1:] are args
+  -- Ref: command.lem:builtin_source — strips --, extracts filename, resolves via PATH
+  let args := stripDoubleDash (argv.drop 1)
   match args with
-  | [] => .inl (s, ".: filename argument required")
-  | _ => .inl (s, ".: source not implemented (requires runtime parser)")
+  | [] => .inl (s, "filename argument required")
+  | sfile :: _ =>
+    match tryConcrete sfile with
+    | none => .inl (s, "couldn't handle symbolic argument " ++ stringOfSymbolicString sfile)
+    | some file =>
+      -- Check if file contains '/' and exists directly
+      let mpath :=
+        if file.toList.contains '/' && OS.osFileExists s file then
+          if OS.osIsReadable s file then Sum.inr file
+          else Sum.inl "unreadable"
+        else
+          match lookupConcreteParam s "PATH" with
+          | none => Sum.inl "no PATH"
+          | some pathvar =>
+            let paths := splitStringOn true ':' pathvar
+            match resolvePathWith (fun p => OS.osIsReadable s p) paths file with
+            | none => Sum.inl "not found"
+            | some path => Sum.inr path
+      match mpath with
+      | .inl msg => .inl (s, file ++ ": " ++ msg)
+      | .inr _path =>
+        -- File found but we can't parse/execute it (requires runtime parser)
+        .inl (s, file ++ ": source not implemented (requires runtime parser)")
 
 def builtinEval (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=

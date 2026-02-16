@@ -61,6 +61,7 @@ tools/dump_ast tests/shell/builtin.echo.exitcode.test > tests/shell_json/builtin
 
 The test suite (in `run_tests.sh`) compares:
 - **stdout** — against `.out` files (empty expected if no `.out` file)
+- **stderr** — against `.err` files (only checked when `.err` file exists)
 - **exit code** — against `.ec` files (default expected: 0)
 - Skipped tests: eval builtin tests (require runtime parsing) and async trap tests
 - Each test runs with a 5-second timeout
@@ -71,12 +72,13 @@ The test suite (in `run_tests.sh`) compares:
 |---|---|
 | Total test JSON files | 186 |
 | Total tested (excl. skipped) | 180 |
-| **Passing** | **114** |
-| **Failing** | **66** |
+| **Passing** | **111** |
+| **Failing** | **68** |
 | **Skipped (eval/async)** | **6** |
-| **Pass rate (of tested)** | **63%** |
+| **Timeouts** | **1** |
+| **Pass rate (of tested)** | **61%** |
 
-*Tests without `.out`/`.ec` files pass if ec=0 and stdout is empty.*
+*Tests without `.out`/`.ec`/`.err` files pass if ec=0 and stdout is empty.*
 
 **Skipped tests**: `builtin.eval`, `builtin.eval.break`, `builtin.eval.trap`, `semantics.eval.makeadder` (require `eval` runtime parsing), `semantics.traps.async`, `semantics.traps.inherit` (require async signal delivery).
 
@@ -95,7 +97,7 @@ The test suite (in `run_tests.sh`) compares:
 #### Failing tests
 
 <details>
-<summary>Click to expand full list (66 failures)</summary>
+<summary>Click to expand full list (68 failures)</summary>
 
 | Test | Category |
 |---|---|
@@ -104,6 +106,7 @@ The test suite (in `run_tests.sh`) compares:
 | `builtin.cd.pwd` | TEST_ONLY: filesystem-dependent |
 | `builtin.command.exec` | `command -p` path lookup (symbolic execve) |
 | `builtin.dot.break` | `break` inside sourced file |
+| `builtin.dot.nonexistent` | Stderr: symbolic OS has no PATH (returns `no PATH` vs `not found`) |
 | `builtin.dot.path` | `source` PATH lookup |
 | `builtin.dot.return` | `return` inside sourced file |
 | `builtin.dot.unreadable` | Unreadable file error handling |
@@ -119,6 +122,7 @@ The test suite (in `run_tests.sh`) compares:
 | `builtin.kill.signame` | Signal delivery / trap interaction |
 | `builtin.readonly.assign.interactive` | Interactive mode |
 | `builtin.set.quoted` | External `grep` |
+| `builtin.source.nonexistent` | Stderr: symbolic OS has no PATH (returns `no PATH` vs `not found`) |
 | `builtin.source.setvar` | `source`/`dot` unimplemented |
 | `builtin.test.nonposix` | TEST_ONLY: filesystem |
 | `builtin.test.-nt.-ot.absent` | TEST_ONLY: filesystem |
@@ -128,6 +132,7 @@ The test suite (in `run_tests.sh`) compares:
 | `semantics.background.nojobs.stdin` | Background stdin redirect |
 | `semantics.background.pid` | PID tracking |
 | `semantics.background.pipe.pid` | PID tracking in pipes |
+| `semantics.backtick.exit` | Stderr: EXIT trap not firing in command substitution subshell |
 | `semantics.backtick.fds` | Backtick FD handling |
 | `semantics.backtick.ppid` | `$PPID` (external) |
 | `semantics.-C` | TEST_ONLY: noclobber |
@@ -179,11 +184,9 @@ The following tests were fixed through targeted translation corrections:
 |---|---|
 | `builtin.command.keyword` | Fixed `command -v` keyword handling |
 | `builtin.command.nospecial` | Fixed stderr format |
-| `builtin.dot.nonexistent` | Fixed error message |
 | `builtin.exec.badredir` | Fixed exit code for bad redirections |
 | `builtin.exitcode` | Fixed builtin exit code propagation |
 | `builtin.pwd.exitcode` | Fixed `pwd` exit code |
-| `builtin.source.nonexistent` | Fixed error message |
 | `builtin.source.nonexistent.earlyexit` | Fixed early exit behavior |
 | `builtin.trap.exit.subshell` | Fixed EXIT trap in subshell via `osWaitpid` |
 | `builtin.trap.nested` | Fixed `parseTrapString` with nesting-aware splitting + quote-aware words |
@@ -192,10 +195,9 @@ The following tests were fixed through targeted translation corrections:
 | `builtin.trap.subshell.loud` | Fixed `parseTrapString` subshell parsing with `splitTopLevel` |
 | `builtin.trap.subshell.loud2` | Fixed `parseTrapString` subshell parsing |
 | `builtin.trap.subshell.truefalse` | Fixed subshell trap interaction |
-| `builtin.unset` | Fixed unset error message |
+| `builtin.unset` | Fixed `unsetParam` error message to match OCaml (`x is read-only`) |
 | `parse.error` | Fixed parse error handling |
 | `semantics.background` | Fixed `osWaitpid` to step background processes |
-| `semantics.backtick.exit` | Fixed backtick exit status |
 | `semantics.for.readonly` | Fixed readonly in for loop |
 | `semantics.fun.error.restore` | Fixed `osOpenFileForRedir` to check file existence for `from_` redirects |
 | `semantics.redir.close` | Fixed redirect close + exit code |

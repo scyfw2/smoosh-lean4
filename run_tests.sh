@@ -81,13 +81,14 @@ for f in "$JSON_DIR"/*.json; do
   fi
 
   # Load expected values
-  exp_out="" ; exp_ec=0 ; has_expected=0
+  exp_out="" ; exp_ec=0 ; exp_err="" ; has_expected=0 ; has_exp_err=0
   [ -f "$TEST_DIR/$bn.out" ] && { exp_out=$(cat "$TEST_DIR/$bn.out"); has_expected=1; }
   [ -f "$TEST_DIR/$bn.ec" ]  && { exp_ec=$(cat "$TEST_DIR/$bn.ec" | tr -d '[:space:]'); has_expected=1; }
+  [ -f "$TEST_DIR/$bn.err" ] && { exp_err=$(cat "$TEST_DIR/$bn.err"); has_expected=1; has_exp_err=1; }
 
   # Compare
   if [ "$has_expected" -eq 0 ]; then
-    # No .out/.ec file: pass if ec=0 and stdout is empty
+    # No .out/.ec/.err file: pass if ec=0 and stdout is empty
     if [ "$got_ec" -eq 0 ] && [ -z "$got_out" ]; then
       pass=$((pass + 1))
     else
@@ -96,11 +97,12 @@ for f in "$JSON_DIR"/*.json; do
       $VERBOSE && echo "FAIL: $bn (no expected files; got ec=$got_ec, stdout='$(echo "$got_out" | head -1)')"
     fi
   else
-    out_match=true ; ec_match=true
+    out_match=true ; ec_match=true ; err_match=true
     [ "$got_out" != "$exp_out" ] && out_match=false
     [ "$got_ec" != "$exp_ec" ]   && ec_match=false
+    [ "$has_exp_err" -eq 1 ] && [ "$got_err" != "$exp_err" ] && err_match=false
 
-    if $out_match && $ec_match; then
+    if $out_match && $ec_match && $err_match; then
       pass=$((pass + 1))
     else
       fail=$((fail + 1))
@@ -109,6 +111,7 @@ for f in "$JSON_DIR"/*.json; do
         echo "FAIL: $bn"
         $out_match || echo "  stdout diff (expected ${#exp_out} chars, got ${#got_out} chars)"
         $ec_match  || echo "  ec expected=$exp_ec got=$got_ec"
+        $err_match || echo "  stderr diff (expected ${#exp_err} chars, got ${#got_err} chars)"
       fi
     fi
   fi
