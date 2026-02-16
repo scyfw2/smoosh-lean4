@@ -1,0 +1,9 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"hi"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"file"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"command"},
+{"tag":"F"},
+{"tag":"S","v":"exec"}],"rs":[{"tag":"File","ty":"From","src":8,"tgt":[{"tag":"S","v":"file"}]}]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"read"},
+{"tag":"F"},
+{"tag":"S","v":"msg"}],"rs":[{"tag":"Dup","ty":"FromFD","src":0,"tgt":[{"tag":"S","v":"8"}]}]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"msg","fmt":{"tag":"Normal"}}}],"rs":[]}}

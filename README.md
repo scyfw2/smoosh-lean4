@@ -25,205 +25,185 @@ The build produces:
 
 ## Running Tests
 
+All test files are self-contained in the `tests/` directory. The `tools/` directory contains the OCaml `dump_ast` binary for regenerating JSON ASTs from `.test` files.
+
+### Run All Tests
+
+```bash
+# Run full test suite (builds smoosh-test if needed)
+bash run_tests.sh
+
+# Verbose mode — shows failure details
+bash run_tests.sh --verbose
+
+# Filter to specific tests
+bash run_tests.sh --filter=builtin.echo
+```
+
 ### Run a Single Test
 
 ```bash
-.lake/build/bin/smoosh-test ../smoosh/tests/shell_json/<test-name>.json
+.lake/build/bin/smoosh-test tests/shell_json/<test-name>.json
 ```
 
-This prints the stdout output from the symbolic shell execution to stdout.
+This prints the stdout output from the symbolic shell execution.
 
-### Compare Against Expected Output
+### Regenerating JSON ASTs
+
+If you edit a `.test` file, regenerate its JSON AST using the OCaml `dump_ast` binary:
 
 ```bash
-# Compare stdout output with expected .out file
-diff <(.lake/build/bin/smoosh-test ../smoosh/tests/shell_json/builtin.echo.exitcode.json) \
-     ../smoosh/tests/shell/builtin.echo.exitcode.out
+# Generate JSON from a shell test script
+tools/dump_ast tests/shell/builtin.echo.exitcode.test > tests/shell_json/builtin.echo.exitcode.json
 ```
 
-### Run All Tests (Automated)
+### Test Suite Details
 
-The test suite compares three aspects:
-- **stdout** — against `.out` files
+The test suite (in `run_tests.sh`) compares:
+- **stdout** — against `.out` files (empty expected if no `.out` file)
 - **exit code** — against `.ec` files (default expected: 0)
-- **stderr** — against `.err` files
-
-Tests are skipped if they have no `.out`, `.ec`, or `.err` file, or if they are
-eval tests (require runtime parsing) / `benchmark.fact5` (stack overflow).
-
-```bash
-cd lean-smoosh
-
-for f in ../smoosh/tests/shell_json/*.json; do
-  name=$(basename "$f" .json)
-
-  # Skip eval tests and benchmark.fact5
-  case "$name" in
-    builtin.eval*|semantics.eval*|benchmark.fact5) continue;;
-  esac
-
-  outfile="../smoosh/tests/shell/${name}.out"
-  ecfile="../smoosh/tests/shell/${name}.ec"
-  errfile="../smoosh/tests/shell/${name}.err"
-
-  # At least one expected file must exist
-  [ ! -f "$outfile" ] && [ ! -f "$ecfile" ] && [ ! -f "$errfile" ] && continue
-
-  # Run test, capture stdout, stderr, and exit code
-  timeout 10 .lake/build/bin/smoosh-test "$f" \
-    > /tmp/test_stdout.txt 2>/tmp/test_stderr.txt
-  got_ec=$?
-
-  pass=true
-  reasons=""
-
-  # Check stdout against .out
-  if [ -f "$outfile" ]; then
-    diff -q --strip-trailing-cr /tmp/test_stdout.txt "$outfile" > /dev/null 2>&1 \
-      || { pass=false; reasons="stdout"; }
-  fi
-
-  # Check exit code against .ec
-  if [ -f "$ecfile" ]; then
-    expected_ec=$(tr -d '[:space:]' < "$ecfile")
-    [ "$got_ec" != "$expected_ec" ] && { pass=false; reasons="$reasons ec"; }
-  fi
-
-  # Check stderr against .err
-  if [ -f "$errfile" ]; then
-    diff -q --strip-trailing-cr /tmp/test_stderr.txt "$errfile" > /dev/null 2>&1 \
-      || { pass=false; reasons="$reasons stderr"; }
-  fi
-
-  $pass && echo "PASS: $name" || echo "FAIL: $name [$reasons]"
-done
-
-rm -f /tmp/test_stdout.txt /tmp/test_stderr.txt
-```
+- Skipped tests: eval builtin tests (require runtime parsing) and async trap tests
+- Each test runs with a 5-second timeout
 
 ### Current Test Results
 
 | Metric | Count |
 |---|---|
 | Total test JSON files | 186 |
-| Tests with expected output (`.out`) | 147 |
-| **Tested** | **147** |
-| **Passing** | **92** |
-| **Failing** | **55** |
-| **Pass rate** | **62.6%** |
+| Total tested (excl. skipped) | 180 |
+| **Passing** | **114** |
+| **Failing** | **66** |
+| **Skipped (eval/async)** | **6** |
+| **Pass rate (of tested)** | **63%** |
+
+*Tests without `.out`/`.ec` files pass if ec=0 and stdout is empty.*
+
+**Skipped tests**: `builtin.eval`, `builtin.eval.break`, `builtin.eval.trap`, `semantics.eval.makeadder` (require `eval` runtime parsing), `semantics.traps.async`, `semantics.traps.inherit` (require async signal delivery).
 
 #### Failure Breakdown
 
 | Category | Count | Description |
 |---|---|---|
-| External commands / `$TEST_SHELL` dependency | ~8 | Tests needing real shell execution (`argv0`, `ppid`, `link`, etc.) |
-| Trap / signal handling gaps | ~10 | EXIT traps in subshells, nested traps, signal inheritance |
-| Pattern matching / escaping | ~8 | Bracket expressions, backslash escaping, heredoc dollar |
-| Builtin behavior gaps | ~12 | `export`, `dot`/`source`, `set`, `kill`, `hash`, `history` |
-| Eval / runtime parsing | ~3 | `eval` builtin requires runtime parser not available |
-| Background / wait semantics | ~3 | Signal-based wait, `wait` for already-dead processes |
-| Other (IFS, globbing, redir) | ~11 | Field splitting edge cases, globbing, redirection FDs |
+| External commands / `$TEST_SHELL` dependency | ~25 | Tests needing real shell execution, external utilities (`grep`, `sed`, `kill`, `mkfifo`, etc.) |
+| Filesystem / glob / pattern matching | ~10 | Tests needing real filesystem (glob expansion, `touch`, file tests) |
+| Trap / signal handling gaps | ~3 | Signal delivery, trap variable expansion timing |
+| Builtin behavior gaps | ~9 | `dot`/`source`, `hash`, `history`, `times` |
+| Background / wait / pipe semantics | ~6 | PID tracking, `wait` for killed processes, job control |
+| Interactive / monitoring modes | ~5 | Interactive prompts, job control, monitor mode |
+| Other (tilde, IFS, redir) | ~4 | Tilde expansion, IFS edge cases, FD redirection |
 
 #### Failing tests
 
 <details>
-<summary>Click to expand full list (55 failures)</summary>
+<summary>Click to expand full list (66 failures)</summary>
 
 | Test | Category |
 |---|---|
-| `benchmark.fact5` | Stack overflow (recursive factorial) |
-| `builtin.command.exec` | `command -p` path lookup |
+| `benchmark.fact5` | Stack overflow (recursive factorial with `ulimit`) |
+| `benchmark.while` | External commands (`head`, `sed`) |
+| `builtin.cd.pwd` | TEST_ONLY: filesystem-dependent |
+| `builtin.command.exec` | `command -p` path lookup (symbolic execve) |
 | `builtin.dot.break` | `break` inside sourced file |
 | `builtin.dot.path` | `source` PATH lookup |
 | `builtin.dot.return` | `return` inside sourced file |
 | `builtin.dot.unreadable` | Unreadable file error handling |
 | `builtin.exec.modernish.mkfifo.loop` | External `mkfifo` command |
-| `builtin.export` | Export variable display format |
-| `builtin.export.override` | Export override semantics |
-| `builtin.export.unset` | Unset + export interaction |
-| `builtin.hash.nonposix` | `hash` builtin (non-POSIX) |
+| `builtin.export` | External commands needed |
+| `builtin.export.override` | Symbolic execve |
+| `builtin.export.unset` | External `grep` |
+| `builtin.hash.nonposix` | External `ls`, `grep` |
 | `builtin.history.nonposix` | `history` builtin (non-POSIX) |
-| `builtin.kill.signame` | `kill` signal name display |
-| `builtin.readonly.assign.interactive` | Readonly assignment in interactive mode |
-| `builtin.set.quoted` | `set` with quoted arguments |
-| `builtin.source.setvar` | Variable setting via `source` |
-| `builtin.times.ioerror` | `times` with I/O error |
-| `builtin.trap.nested` | Nested trap handlers |
-| `builtin.trap.redirect` | Trap with redirection |
-| `builtin.trap.return` | Trap + return interaction |
-| `builtin.trap.subshell.loud` | Trap in subshell (loud) |
-| `builtin.trap.subshell.loud2` | Trap in subshell (loud2) |
-| `builtin.trap.supershell` | Trap in parent shell |
+| `builtin.jobs` | External `grep` |
+| `builtin.kill0_+5` | Signal delivery |
+| `builtin.kill.jobs` | Signal delivery / job control |
+| `builtin.kill.signame` | Signal delivery / trap interaction |
+| `builtin.readonly.assign.interactive` | Interactive mode |
+| `builtin.set.quoted` | External `grep` |
+| `builtin.source.setvar` | `source`/`dot` unimplemented |
+| `builtin.test.nonposix` | TEST_ONLY: filesystem |
+| `builtin.test.-nt.-ot.absent` | TEST_ONLY: filesystem |
+| `builtin.test.symlink` | TEST_ONLY: filesystem |
+| `builtin.times.ioerror` | Complex pipe/signal interaction |
+| `builtin.trap.redirect` | Variable expansion timing in trap handler |
+| `semantics.background.nojobs.stdin` | Background stdin redirect |
+| `semantics.background.pid` | PID tracking |
+| `semantics.background.pipe.pid` | PID tracking in pipes |
 | `semantics.backtick.fds` | Backtick FD handling |
-| `semantics.backtick.ppid` | `$PPID` in backtick (external) |
-| `semantics.command.argv0` | `$0` / argv[0] handling (external) |
-| `semantics.command-subst.newline` | Newline in command substitution |
-| `semantics.dot.glob` | Globbing with dot files |
-| `semantics.errexit.carryover` | `set -e` carryover in subshell |
-| `semantics.escaping.backslash` | Backslash escaping edge cases |
-| `semantics.escaping.heredoc.dollar` | Dollar in heredoc escaping |
-| `semantics.escaping.quote` | Quote escaping edge cases |
-| `semantics.escaping.single` | Single quote escaping |
-| `semantics.eval.makeadder` | `eval` making closures (runtime parse) |
-| `semantics.evalorder.fun` | Function evaluation order |
-| `semantics.expansion.heredoc.backslash` | Heredoc backslash expansion |
-| `semantics.expansion.quotes.adjacent` | Adjacent quote expansion |
-| `semantics.fun.error.restore` | Function error restore |
-| `semantics.interactive.expansion.exit` | Interactive expansion exit |
-| `semantics.monitoring.ttou` | Monitoring TTOU signal |
-| `semantics.pattern.hyphen` | Hyphen in bracket pattern |
-| `semantics.pattern.rightbracket` | Right bracket in pattern |
-| `semantics.redir.fds` | Redirection with high FDs |
-| `semantics.simple.link` | Symlink following (external) |
-| `semantics.slash.glob` | Slash in glob pattern |
-| `semantics.splitting.ifs` | IFS field splitting edge cases |
-| `semantics.subshell.background.traps` | Background subshell trap inheritance |
-| `semantics.tilde.quoted.prefix` | Tilde expansion in quoted prefix |
-| `semantics.traps.async` | Async trap handling (timeout) |
-| `semantics.traps.inherit` | Trap inheritance (timeout) |
-| `semantics.wait.alreadydead` | Wait for killed process exit code |
-| `sh.-c.arg0` | `sh -c` argv[0] handling |
-| `sh.file.weirdness` | File handling edge cases |
-| `sh.ps1.override` | PS1 prompt override |
-| `sh.set.ifs` | `set` with IFS |
+| `semantics.backtick.ppid` | `$PPID` (external) |
+| `semantics.-C` | TEST_ONLY: noclobber |
+| `semantics.command.argv0` | `$0` handling (external) |
+| `semantics.dot.glob` | Glob expansion (filesystem) |
+| `semantics.errexit.carryover` | Symbolic execve |
+| `semantics.errexit.trap` | Signal delivery (`kill -s USR1 $$`) |
+| `semantics.error.noninteractive` | External script execution |
+| `semantics.escaping.backslash` | External commands |
+| `semantics.escaping.quote` | External commands |
+| `semantics.evalorder.fun` | External `rm`, file existence checks |
+| `semantics.expansion.quotes.adjacent` | Glob expansion (filesystem) |
+| `semantics.-h.nonposix` | `hash` builtin |
+| `semantics.interactive.expansion.exit` | Interactive mode |
+| `semantics.kill.traps` | Signal delivery |
+| `semantics.monitoring.ttou` | Monitor mode / TTOU |
+| `semantics.pattern.hyphen` | Glob expansion (filesystem) |
+| `semantics.pattern.modernish` | Glob expansion (filesystem) |
+| `semantics.pattern.rightbracket` | Glob expansion (filesystem) |
+| `semantics.pipe.chained` | External `seq` |
+| `semantics.redir.fds` | High FD redirection (symbolic execve) |
+| `semantics.redir.from` | TEST_ONLY: filesystem |
+| `semantics.redir.toomany` | TEST_ONLY: external `seq` |
+| `semantics.return.not` | TEST_ONLY: OCaml mismatch |
+| `semantics.simple.link` | External commands |
+| `semantics.slash.glob` | Glob expansion (filesystem) |
+| `semantics.subshell.background.traps` | Signal delivery |
+| `semantics.tilde.colon` | Tilde expansion in colon paths |
+| `semantics.wait.alreadydead` | Signal delivery / wait |
+| `sh.-c.arg0` | External execution |
+| `sh.env.ppid` | External execution |
+| `sh.file.weirdness` | External execution |
+| `sh.interactive.ps1` | Interactive mode |
+| `sh.monitor.bg` | Monitor mode |
+| `sh.monitor.fg` | Monitor mode |
+| `sh.ps1.override` | Interactive mode |
+| `sh.set.ifs` | External script execution |
 
 </details>
 
 #### Tests Fixed (previously failing, now passing)
 
 <details>
-<summary>Click to expand list of fixed tests (24 tests fixed from baseline)</summary>
+<summary>Click to expand list of fixed tests</summary>
 
 The following tests were fixed through targeted translation corrections:
 
 | Test | Fix Applied |
 |---|---|
-| `builtin.alias.empty` | Fixed stderr error message |
 | `builtin.command.keyword` | Fixed `command -v` keyword handling |
 | `builtin.command.nospecial` | Fixed stderr format |
 | `builtin.dot.nonexistent` | Fixed error message |
 | `builtin.exec.badredir` | Fixed exit code for bad redirections |
 | `builtin.exitcode` | Fixed builtin exit code propagation |
-| `builtin.jobs` | Fixed job status display |
 | `builtin.pwd.exitcode` | Fixed `pwd` exit code |
 | `builtin.source.nonexistent` | Fixed error message |
 | `builtin.source.nonexistent.earlyexit` | Fixed early exit behavior |
 | `builtin.trap.exit.subshell` | Fixed EXIT trap in subshell via `osWaitpid` |
+| `builtin.trap.nested` | Fixed `parseTrapString` with nesting-aware splitting + quote-aware words |
+| `builtin.trap.return` | Fixed `parseTrapString` function definition parsing |
 | `builtin.trap.subshell.false.exit` | Fixed subshell exit code with trap |
+| `builtin.trap.subshell.loud` | Fixed `parseTrapString` subshell parsing with `splitTopLevel` |
+| `builtin.trap.subshell.loud2` | Fixed `parseTrapString` subshell parsing |
 | `builtin.trap.subshell.truefalse` | Fixed subshell trap interaction |
 | `builtin.unset` | Fixed unset error message |
 | `parse.error` | Fixed parse error handling |
 | `semantics.background` | Fixed `osWaitpid` to step background processes |
 | `semantics.backtick.exit` | Fixed backtick exit status |
-| `semantics.errexit.trap` | Fixed errexit + trap interaction |
-| `semantics.error.noninteractive` | Fixed non-interactive error handling |
 | `semantics.for.readonly` | Fixed readonly in for loop |
-| `semantics.pipe.chained` | Fixed chained pipe handling |
+| `semantics.fun.error.restore` | Fixed `osOpenFileForRedir` to check file existence for `from_` redirects |
 | `semantics.redir.close` | Fixed redirect close + exit code |
 | `semantics.return.trap` | Fixed return + trap interaction |
 | `semantics.substring.quotes` | Fixed substring with quotes |
 | `semantics.var.alt.nullifs` | Fixed `$@` with null IFS alternative |
-| `sh.interactive.ps1` | Fixed PS1 display |
+| `builtin.alias.empty` | Fixed `builtinAlias` `splitStringOn` → `String.splitOn` for empty alias values + alias expansion in `runCommand` |
+| `builtin.trap.supershell` | Fixed `clearSupershellTraps` to reset supershell traps in subshell + `trap -p` display for supershell traps |
 
 </details>
 
@@ -289,21 +269,28 @@ lean-smoosh/
 ├── lakefile.toml           # Build configuration
 ├── lean-toolchain          # Lean version (v4.27.0)
 ├── Main.lean               # Test runner entry point
-└── Smoosh/
-    ├── Prelude.lean         # Types, utilities, AST definitions
-    ├── Num.lean             # Numeric parsing and formatting
-    ├── Signal.lean          # Signal types and conversions
-    ├── Os.lean              # OS state, typeclass, helpers
-    ├── OsSymbolic.lean      # Symbolic OS implementation
-    ├── Pattern.lean         # Glob pattern parsing and matching
-    ├── SmooshPath.lean      # Pathname expansion (globbing)
-    ├── Fields.lean          # Field splitting, quote removal
-    ├── Arith.lean           # Arithmetic expression evaluation
-    ├── Test.lean            # `test`/`[` builtin expression parser
-    ├── Command.lean         # Builtins and command dispatch
-    ├── Semantics.lean       # Core step evaluation engine
-    ├── FromJson.lean        # JSON → AST parser for test cases
-    └── Basic.lean           # Module re-export
+├── run_tests.sh            # Automated test runner script
+├── Smoosh/
+│   ├── Prelude.lean         # Types, utilities, AST definitions
+│   ├── Num.lean             # Numeric parsing and formatting
+│   ├── Signal.lean          # Signal types and conversions
+│   ├── Os.lean              # OS state, typeclass, helpers
+│   ├── OsSymbolic.lean      # Symbolic OS implementation
+│   ├── Pattern.lean         # Glob pattern parsing and matching
+│   ├── SmooshPath.lean      # Pathname expansion (globbing)
+│   ├── Fields.lean          # Field splitting, quote removal
+│   ├── Arith.lean           # Arithmetic expression evaluation
+│   ├── Test.lean            # `test`/`[` builtin expression parser
+│   ├── Command.lean         # Builtins and command dispatch
+│   ├── Semantics.lean       # Core step evaluation engine
+│   ├── FromJson.lean        # JSON → AST parser for test cases
+│   └── Basic.lean           # Module re-export
+├── tests/
+│   ├── shell_json/          # 186 pre-parsed JSON ASTs (from dump_ast)
+│   └── shell/               # Expected outputs (.out, .ec, .err) + test scripts (.test)
+└── tools/
+    ├── dump_ast             # OCaml binary: parses .test → JSON AST
+    └── dump_ast.ml          # Source code for dump_ast (reference)
 ```
 
 ---

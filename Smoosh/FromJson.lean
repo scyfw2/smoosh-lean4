@@ -1,6 +1,8 @@
 /-
   Smoosh.FromJson — JSON deserialization for Smoosh AST types.
-  Converts JSON produced by OCaml dump_ast (via shim.ml) into Lean Stmt/Entry types.
+  Converts JSON produced by OCaml `dump_ast` (via `shim.ml:json_of_stmt`) into Lean `Stmt`/`Entry` types.
+
+  ✨ Lean-only module — no OCaml counterpart. The OCaml side serializes via `shim.ml:write_json`.
 -/
 import Smoosh.Prelude
 
@@ -53,6 +55,8 @@ def JValue.tag? (j : JValue) : Option String :=
 /-! # JSON parser operating on List Char -/
 
 -- All JSON parsing uses List Char to avoid String.Pos API issues
+/-- Parse a JSON value from a character list. Returns (value, remaining chars).
+    Uses recursive descent — handles strings, objects, arrays, numbers, booleans, null. -/
 partial def parseJsonValue (cs : List Char) : Option (JValue × List Char) :=
   let cs := skipWs cs
   match cs with
@@ -151,6 +155,7 @@ where
       | _ => none
     | none => none
 
+/-- Parse a complete JSON string into a `JValue`. -/
 def parseJsonTop (input : String) : Option JValue :=
   match parseJsonValue input.toList with
   | some (v, _) => some v
@@ -160,6 +165,8 @@ def parseJsonTop (input : String) : Option JValue :=
 
 mutual
 
+/-- Deserialize a `Format` (parameter expansion format) from JSON.
+    Ref: corresponds to OCaml `shim.ml:json_of_format` (serializer). -/
 partial def formatOfJson (j : JValue) : Format :=
   match j.tag? with
   | some "Normal" => .normal
@@ -182,6 +189,7 @@ partial def formatOfJson (j : JValue) : Format :=
     .substring side mode (wordsOfJson (j.field? "w"))
   | _ => .normal
 
+/-- Deserialize a `Control` (tilde, param, backtick, arith, quote, escape) from JSON. -/
 partial def controlOfJson (j : JValue) : Control :=
   match j.tag? with
   | some "Tilde" =>
@@ -207,6 +215,7 @@ partial def controlOfJson (j : JValue) : Control :=
     .escape ch
   | _ => .escape ' '
 
+/-- Deserialize a word `Entry` (S=string, K=control, F=field separator) from JSON. -/
 partial def entryOfJson (j : JValue) : Entry :=
   match j.tag? with
   | some "S" => .s ((j.field? "v" >>= JValue.asStr?).getD "")
@@ -217,11 +226,13 @@ partial def entryOfJson (j : JValue) : Entry :=
   | some "F" => .f
   | _ => .s ""
 
+/-- Deserialize a word list from an optional JSON array. -/
 partial def wordsOfJson (mj : Option JValue) : List Entry :=
   match mj >>= JValue.asArr? with
   | some ws => ws.map entryOfJson
   | none => []
 
+/-- Deserialize a `Redir` (file, dup, heredoc) from JSON. -/
 partial def redirOfJson (j : JValue) : Redir :=
   match j.tag? with
   | some "File" =>
@@ -240,6 +251,9 @@ partial def redirOfJson (j : JValue) : Redir :=
     .rheredoc ty ((j.field? "src" >>= JValue.asNat?).getD 0) (wordsOfJson (j.field? "w"))
   | _ => .rfile .to 1 []
 
+/-- Deserialize a `Stmt` from JSON. This is the main AST deserialization entry point.
+    Handles all statement types: Command, Semi, And, Or, Not, Pipe, Redir, Background,
+    Subshell, If, While, For, Case, Defun. -/
 partial def stmtOfJson (j : JValue) : Stmt :=
   match j.tag? with
   | some "Command" =>
@@ -292,6 +306,7 @@ partial def stmtOfJson (j : JValue) : Stmt :=
     .defun ((j.field? "name" >>= JValue.asStr?).getD "") (sf j "body")
   | _ => .done
 
+/-- Helper: look up a key in a JSON object and deserialize it as a `Stmt`. -/
 partial def sf (j : JValue) (key : String) : Stmt :=
   match j.field? key with
   | some v => stmtOfJson v

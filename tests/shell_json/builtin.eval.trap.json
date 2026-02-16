@@ -1,0 +1,5 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"eval"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"(trap \"echo bug\" EXIT)"}]}}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"/dev/null"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"ok"}],"rs":[]}}

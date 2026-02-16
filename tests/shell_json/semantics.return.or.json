@@ -1,0 +1,9 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Defun","name":"f","body":{"tag":"Or","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"return"},
+{"tag":"F"},
+{"tag":"S","v":"5"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"fail"},
+{"tag":"F"},
+{"tag":"S","v":"passthrough"}],"rs":[]}}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"f"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"?","fmt":{"tag":"Normal"}}}],"rs":[]}}

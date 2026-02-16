@@ -1,0 +1,9 @@
+{"tag":"Command","assigns":[{"var":"PS1","value":[{"tag":"K","v":{"tag":"Quote","f":[],"w":[]}}]}],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"-i"},
+{"tag":"F"},
+{"tag":"S","v":"-c"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"echo ${x"},
+{"tag":"K","v":{"tag":"Escape","character":"?"}},
+{"tag":"S","v":"alas, poor yorick}; echo hello; exit"}]}}],"rs":[]}

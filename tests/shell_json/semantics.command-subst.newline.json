@@ -1,0 +1,5 @@
+{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"Heredoc","ty":"XHere","src":0,"w":[{"tag":"S","v":"1\n"},
+{"tag":"K","v":{"tag":"Backtick","stmt":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[]}}],"rs":[]}}},
+{"tag":"S","v":"\n2\n"}]}]}

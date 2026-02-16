@@ -1,0 +1,12 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[{"var":"myvar","value":[{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"a b c"}]}}]}],"args":[],"rs":[]},"r":{"tag":"Pipe","bg":false,"cs":[{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"set"}],"rs":[]},
+{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"grep"},
+{"tag":"F"},
+{"tag":"S","v":"myvar"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"scr"}]}]}]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"."},
+{"tag":"F"},
+{"tag":"S","v":"./scr"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"printf"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"%s"},
+{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"S","v":"n"}]}},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"myvar","fmt":{"tag":"Normal"}}}],"rs":[]}}

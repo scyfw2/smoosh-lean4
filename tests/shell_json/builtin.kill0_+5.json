@@ -1,0 +1,8 @@
+{"tag":"Not","c":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"kill"},
+{"tag":"F"},
+{"tag":"S","v":"-s"},
+{"tag":"F"},
+{"tag":"S","v":"0"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Arith","f":[],"w":[{"tag":"K","v":{"tag":"Param","var":"$","fmt":{"tag":"Normal"}}},
+{"tag":"S","v":"+5"}]}}],"rs":[]}}

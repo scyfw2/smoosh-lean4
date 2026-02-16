@@ -1,0 +1,13 @@
+{"tag":"Semi","l":{"tag":"And","l":{"tag":"Subshell","c":{"tag":"For","var":"x","args":[{"tag":"S","v":"a"},
+{"tag":"F"},
+{"tag":"S","v":"b"},
+{"tag":"F"},
+{"tag":"S","v":"c"}],"body":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"x","fmt":{"tag":"Normal"}}}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"readonly"},
+{"tag":"F"},
+{"tag":"S","v":"x"}],"rs":[]}}},"ers":[],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"exit"},
+{"tag":"F"},
+{"tag":"S","v":"1"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"exit"},
+{"tag":"F"},
+{"tag":"S","v":"0"}],"rs":[]}}

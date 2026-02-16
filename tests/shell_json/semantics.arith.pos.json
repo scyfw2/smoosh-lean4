@@ -1,0 +1,11 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[{"var":"a","value":[{"tag":"S","v":"+47"}]}],"args":[],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"["},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Arith","f":[],"w":[{"tag":"S","v":"a"}]}},
+{"tag":"F"},
+{"tag":"S","v":"-eq"},
+{"tag":"F"},
+{"tag":"S","v":"47"},
+{"tag":"F"},
+{"tag":"S","v":"]"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Arith","f":[],"w":[{"tag":"S","v":"a"}]}}],"rs":[]}}

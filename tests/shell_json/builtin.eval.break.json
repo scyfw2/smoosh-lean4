@@ -1,0 +1,9 @@
+{"tag":"For","var":"x","args":[{"tag":"S","v":"a"},
+{"tag":"F"},
+{"tag":"S","v":"b"},
+{"tag":"F"},
+{"tag":"S","v":"c"}],"body":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"x","fmt":{"tag":"Normal"}}}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"eval"},
+{"tag":"F"},
+{"tag":"S","v":"break"}],"rs":[]}}}

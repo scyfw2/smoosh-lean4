@@ -1,6 +1,13 @@
 /-
   Smoosh.Prelude — Core types, AST, shell state, and helpers
-  Translated from smoosh_prelude.lem (2365 lines)
+  Translated from `smoosh_prelude.lem` (2365 lines).
+
+  This is the largest module — defines all fundamental types:
+  - Shell AST (`Stmt`, `Entry`, `Control`, `Format`, `Redir`)
+  - Symbolic strings (`SymbolicChar`, `SymbolicString`)
+  - Shell state (`ShellState`, `Env`, `LocalEnv`)
+  - Field types (`Fields`, `IntermediateFields`, `ExpandedWords`)
+  - Utility functions (string manipulation, sorting, permission parsing)
 -/
 import Smoosh.Num
 import Smoosh.Signal

@@ -1,0 +1,8 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"scr"}]},
+{"tag":"Heredoc","ty":"Here","src":0,"w":[{"tag":"S","v":"foo=bar\nreadonly -- foo\nreadonly -- baz=quux\necho $foo $baz >&3\nfoo=nope\nunset baz\necho $foo $baz >&3\n"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"exec"}],"rs":[{"tag":"Dup","ty":"ToFD","src":3,"tgt":[{"tag":"S","v":"1"}]},
+{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"/dev/null"}]},
+{"tag":"File","ty":"To","src":2,"tgt":[{"tag":"S","v":"/dev/null"}]}]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"-i"},
+{"tag":"F"},
+{"tag":"S","v":"scr"}],"rs":[]}}

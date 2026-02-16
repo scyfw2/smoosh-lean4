@@ -1,6 +1,12 @@
 /-
   Smoosh.Semantics — Expansion stepping, evaluation stepping, trap management
-  Translated from semantics.lem (1679 lines)
+  Translated from `semantics.lem` (1679 lines).
+
+  The core evaluation engine implementing small-step semantics:
+  - `stepExpansion`: word expansion (tilde, parameter, backtick, arith, quote)
+  - `stepEval`: statement evaluation (if, while, for, case, pipe, redir, etc.)
+  - `checkTraps`: pending signal handling and trap execution
+  - `fullEvaluation`: top-level evaluation loop (step until done or fuel exhausted)
 -/
 import Smoosh.Fields
 import Smoosh.Arith
@@ -515,9 +521,31 @@ private partial def parseTrapWordGo (cs : List Char) (acc : String) (result : Wo
 def parseTrapWord (w : String) : Words :=
   parseTrapWordGo w.toList "" []
 
+-- Split a string into words, respecting single and double quotes
+private partial def splitWordsQuoteAware (s : String) : List String :=
+  let rec go (cs : List Char) (inSingle : Bool) (inDouble : Bool)
+             (current : String) (results : List String) : List String :=
+    match cs with
+    | [] =>
+      let final := current
+      if final.isEmpty then results else results ++ [final]
+    | '\'' :: rest =>
+      if inDouble then go rest inSingle inDouble (current.push '\'') results
+      else go rest (!inSingle) inDouble current results  -- strip quote
+    | '"' :: rest =>
+      if inSingle then go rest inSingle inDouble (current.push '"') results
+      else go rest inSingle (!inDouble) current results  -- strip quote
+    | ' ' :: rest =>
+      if inSingle || inDouble then go rest inSingle inDouble (current.push ' ') results
+      else if current.isEmpty then go rest inSingle inDouble current results
+      else go rest inSingle inDouble "" (results ++ [current])
+    | c :: rest =>
+      go rest inSingle inDouble (current.push c) results
+  go s.toList false false "" []
+
 -- Parse a list of words into a Stmt.command
 private def parseTrapCommandWords (trimmed : String) : Stmt :=
-  let words := trimmed.splitOn " " |>.filter (· != "")
+  let words := splitWordsQuoteAware trimmed
   match words with
   | [] => .done
   | [single] =>
@@ -555,35 +583,90 @@ private def parseTrapCommandWords (trimmed : String) : Stmt :=
         | _ => acc ++ [.f] ++ wordEntries) []
       Stmt.command [] entries [] defaultCmdOpts
 
+-- Split a string by a delimiter, respecting nesting of (), {}, and quotes
+private partial def splitTopLevel (s : String) (delim : String) : List String :=
+  let delimChars := delim.toList
+  let delimLen := delim.length
+  let rec go (cs : List Char) (parenDepth : Nat) (braceDepth : Nat) (inSingle : Bool) (inDouble : Bool)
+             (current : String) (results : List String) : List String :=
+    match cs with
+    | [] =>
+      results ++ [current]
+    | '\'' :: rest =>
+      if inDouble then go rest parenDepth braceDepth inSingle inDouble (current.push '\'') results
+      else go rest parenDepth braceDepth (!inSingle) inDouble (current.push '\'') results
+    | '"' :: rest =>
+      if inSingle then go rest parenDepth braceDepth inSingle inDouble (current.push '"') results
+      else go rest parenDepth braceDepth inSingle (!inDouble) (current.push '"') results
+    | '(' :: rest =>
+      if inSingle || inDouble then go rest parenDepth braceDepth inSingle inDouble (current.push '(') results
+      else go rest (parenDepth + 1) braceDepth inSingle inDouble (current.push '(') results
+    | ')' :: rest =>
+      if inSingle || inDouble then go rest parenDepth braceDepth inSingle inDouble (current.push ')') results
+      else go rest (parenDepth - 1) braceDepth inSingle inDouble (current.push ')') results
+    | '{' :: rest =>
+      if inSingle || inDouble then go rest parenDepth braceDepth inSingle inDouble (current.push '{') results
+      else go rest parenDepth (braceDepth + 1) inSingle inDouble (current.push '{') results
+    | '}' :: rest =>
+      if inSingle || inDouble then go rest parenDepth braceDepth inSingle inDouble (current.push '}') results
+      else go rest parenDepth (braceDepth - 1) inSingle inDouble (current.push '}') results
+    | c :: rest =>
+      if inSingle || inDouble || parenDepth > 0 || braceDepth > 0 then
+        go rest parenDepth braceDepth inSingle inDouble (current.push c) results
+      else
+        -- Check if we're at the delimiter
+        let remaining := c :: rest
+        if remaining.length >= delimLen && remaining.take delimLen == delimChars then
+          go (remaining.drop delimLen) parenDepth braceDepth inSingle inDouble "" (results ++ [current])
+        else
+          go rest parenDepth braceDepth inSingle inDouble (current.push c) results
+  go s.toList 0 0 false false "" []
+
+mutual
 -- Parse a simple command string (no ; && ||)
 -- Handles subshell (cmd) and negation ! cmd (one level deep)
-def parseTrapSimpleCmd (s : String) : Stmt :=
+-- Also handles function definitions: f() { body }
+partial def parseTrapSimpleCmd (s : String) : Stmt :=
   let trimmed := s.trimAscii.toString
   if trimmed.isEmpty then .done
   -- Check for subshell: (cmd)
   else if trimmed.front == '(' && trimmed.back == ')' then
     let inner := ((trimmed.drop 1).dropEnd 1).toString
-    .subshell (parseTrapCommandWords inner) ([], none, [])
+    -- Recursively parse the inner content (it may contain ;, &&, ||)
+    .subshell (parseTrapString inner) ([], none, [])
   -- Check for negation: ! cmd
   else if trimmed.startsWith "! " then
     let rest := (trimmed.drop 2).trimAscii.toString
     .not_ (parseTrapCommandWords rest)
+  -- Check for function definition: name() { body }
+  else if (trimmed.splitOn "()").length > 1 then
+    match trimmed.splitOn "()" with
+    | [name, body] =>
+      let n := name.trimAscii.toString
+      let b := body.trimAscii.toString
+      if b.startsWith "{" && b.endsWith "}" then
+        let inner := ((b.drop 1).dropEnd 1).trimAscii.toString
+        .defun n (parseTrapString inner)
+      else
+        parseTrapCommandWords trimmed
+    | _ => parseTrapCommandWords trimmed
   else
     parseTrapCommandWords trimmed
 
-def parseTrapString (s : String) : Stmt :=
-  -- Split by ';' to get individual statement groups
-  let semiParts := s.splitOn ";"
+partial def parseTrapString (s : String) : Stmt :=
+  -- Split by ';' respecting nesting of (), {}, and quotes
+  let semiParts := splitTopLevel s ";"
   let stmts := semiParts.filterMap fun part =>
     let trimmed := part.trimAscii.toString
     if trimmed.isEmpty then none
     else
-      -- Split by '&&' and '||' to get And/Or chains
-      -- Check for &&
-      match trimmed.splitOn " && " with
+      -- Split by ' && ' and ' || ' respecting nesting
+      let andParts := splitTopLevel trimmed " && "
+      match andParts with
       | [single] =>
         -- No &&, check for ||
-        match single.splitOn " || " with
+        let orParts := splitTopLevel single " || "
+        match orParts with
         | [single2] => some (parseTrapSimpleCmd single2)
         | first :: rest =>
           let firstStmt := parseTrapSimpleCmd first
@@ -593,7 +676,8 @@ def parseTrapString (s : String) : Stmt :=
         let firstStmt := parseTrapSimpleCmd first
         some (rest.foldl (fun acc part =>
           -- Each part after && may contain ||
-          match part.splitOn " || " with
+          let orParts := splitTopLevel part " || "
+          match orParts with
           | [single2] => .and_ acc (parseTrapSimpleCmd single2)
           | first2 :: rest2 =>
             let andRight := parseTrapSimpleCmd first2
@@ -606,6 +690,7 @@ def parseTrapString (s : String) : Stmt :=
   | [] => .done
   | [c] => c
   | c :: rest => rest.foldl (fun acc s => .semi acc s) c
+end
 
 partial def stepEval (s : OsState α) (c : Stmt) (checked : CheckingMode := .unchecked)
     : EvaluationStep × OsState α × Stmt :=

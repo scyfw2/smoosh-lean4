@@ -1,0 +1,3 @@
+{"tag":"Semi","l":{"tag":"Redir","c":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"exec"}],"rs":[{"tag":"File","ty":"From","src":8,"tgt":[{"tag":"S","v":"/dev/null"}]}]},"ers":[],"rs":[{"tag":"Dup","ty":"FromFD","src":8,"tgt":[{"tag":"S","v":"-"}]}]},"r":{"tag":"And","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":":"}],"rs":[{"tag":"Dup","ty":"FromFD","src":0,"tgt":[{"tag":"S","v":"8"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"oops, still open"}]}}],"rs":[]}}}

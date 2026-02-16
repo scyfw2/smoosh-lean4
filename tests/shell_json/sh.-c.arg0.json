@@ -1,0 +1,10 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"scr"}]},
+{"tag":"Heredoc","ty":"XHere","src":0,"w":[{"tag":"S","v":"echo \"i am "},
+{"tag":"K","v":{"tag":"Escape","character":"$"}},
+{"tag":"S","v":"0, hear me roar\"\n"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"-c"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":". \"$0\""}]}},
+{"tag":"F"},
+{"tag":"S","v":"./scr"}],"rs":[]}}

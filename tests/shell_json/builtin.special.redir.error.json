@@ -1,0 +1,5 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":":"}],"rs":[{"tag":"Dup","ty":"ToFD","src":2,"tgt":[{"tag":"S","v":"9"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"oh"},
+{"tag":"F"},
+{"tag":"S","v":"no"}],"rs":[]}}

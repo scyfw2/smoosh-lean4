@@ -1,0 +1,7 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"source"},
+{"tag":"F"},
+{"tag":"S","v":"not_a_thing"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"hi"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"exit"},
+{"tag":"F"},
+{"tag":"S","v":"0"}],"rs":[]}}

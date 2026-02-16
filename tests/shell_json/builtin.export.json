@@ -1,0 +1,12 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"scr"}]},
+{"tag":"Heredoc","ty":"Here","src":0,"w":[{"tag":"S","v":"echo ${var-unset}\n"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"scr"}],"rs":[]}},"r":{"tag":"Command","assigns":[{"var":"var","value":[{"tag":"S","v":"hi"}]}],"args":[],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"scr"}],"rs":[]}},"r":{"tag":"Command","assigns":[{"var":"var","value":[{"tag":"S","v":"here"}]}],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"scr"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"export"},
+{"tag":"F"},
+{"tag":"S","v":"var=bye"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"scr"}],"rs":[]}}

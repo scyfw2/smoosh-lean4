@@ -1,0 +1,9 @@
+{"tag":"For","var":"x","args":[{"tag":"S","v":"a"},
+{"tag":"F"},
+{"tag":"S","v":"b"}],"body":{"tag":"Subshell","c":{"tag":"Semi","l":{"tag":"For","var":"y","args":[{"tag":"S","v":"c"},
+{"tag":"F"},
+{"tag":"S","v":"d"}],"body":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"break"},
+{"tag":"F"},
+{"tag":"S","v":"2"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"x","fmt":{"tag":"Normal"}}}],"rs":[]}},"ers":[],"rs":[]}}

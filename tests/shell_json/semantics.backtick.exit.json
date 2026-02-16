@@ -1,0 +1,7 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[{"var":"foo","value":[{"tag":"K","v":{"tag":"Backtick","stmt":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"trap"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"echo bar"}]}},
+{"tag":"F"},
+{"tag":"S","v":"EXIT"}],"rs":[]}}}]}],"args":[],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"foo","fmt":{"tag":"Normal"}}}],"rs":[{"tag":"Dup","ty":"ToFD","src":1,"tgt":[{"tag":"S","v":"2"}]}]}}

@@ -1,0 +1,6 @@
+{"tag":"Pipe","bg":false,"cs":[{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"exit"}],"rs":[]},
+{"tag":"Command","assigns":[{"var":"PS1","value":[{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"$ "}]}}]}],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"-i"}],"rs":[]}]}

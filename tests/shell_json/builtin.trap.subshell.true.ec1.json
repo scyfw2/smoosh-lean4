@@ -1,0 +1,5 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"trap"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"(true) || echo bug"}]}},
+{"tag":"F"},
+{"tag":"S","v":"EXIT"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"false"}],"rs":[]}}

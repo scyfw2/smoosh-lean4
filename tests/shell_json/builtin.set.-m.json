@@ -1,0 +1,5 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"set"},
+{"tag":"F"},
+{"tag":"S","v":"-m"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"hi"}],"rs":[]}}

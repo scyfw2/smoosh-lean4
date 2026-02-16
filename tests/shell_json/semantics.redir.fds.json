@@ -1,0 +1,3 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_UTIL","fmt":{"tag":"Normal"}}},
+{"tag":"S","v":"/fds"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"exec"}],"rs":[{"tag":"Dup","ty":"ToFD","src":3,"tgt":[{"tag":"S","v":"1"}]}]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_UTIL","fmt":{"tag":"Normal"}}},
+{"tag":"S","v":"/fds"}],"rs":[]}}

@@ -1,0 +1,7 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"unset"},
+{"tag":"F"},
+{"tag":"S","v":"PS1"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"-i"}],"rs":[{"tag":"Heredoc","ty":"XHere","src":0,"w":[{"tag":"S","v":"echo hi\necho bye\n"}]}]}},"r":{"tag":"Command","assigns":[{"var":"PS1","value":[{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"PS1$ "}]}}]}],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"-i"}],"rs":[{"tag":"Heredoc","ty":"XHere","src":0,"w":[{"tag":"S","v":"echo hi\necho bye\n"}]}]}}

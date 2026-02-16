@@ -1,0 +1,5 @@
+{"tag":"Semi","l":{"tag":"And","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"/dev/null"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"OK"}],"rs":[]}},"r":{"tag":"Or","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"/dev/full"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"OK"}],"rs":[]}}}

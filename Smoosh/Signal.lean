@@ -1,6 +1,9 @@
 /-
   Smoosh.Signal — Signal types and helpers
-  Translated from signal.lem
+  Translated from `signal.lem` and `signal_platform.lem`.
+
+  Defines the `Signal` enumeration, string/integer conversions, and default signal behaviors.
+  `signal_of_ocaml_signal` (reverse platform-int lookup) is not translated.
 -/
 import Smoosh.Num
 
@@ -34,20 +37,24 @@ inductive Signal where
   | SIGXFSZ
   deriving Repr, BEq, Hashable, Ord, Inhabited, DecidableEq
 
+/-- Ref: signal.lem:all_signals — Complete list of all `Signal` constructors. -/
 def Signal.allSignals : List Signal :=
   [ .EXIT, .SIGABRT, .SIGALRM, .SIGBUS, .SIGCHLD, .SIGCONT, .SIGFPE,
     .SIGHUP, .SIGILL, .SIGINT, .SIGKILL, .SIGPIPE, .SIGQUIT, .SIGSEGV,
     .SIGSTOP, .SIGTERM, .SIGTSTP, .SIGTTIN, .SIGTTOU, .SIGUSR1, .SIGUSR2,
     .SIGTRAP, .SIGURG, .SIGXCPU, .SIGXFSZ ]
 
+/-- Ref: signal.lem:undefined_traps — Signals that cannot be trapped (KILL, STOP). -/
 def Signal.undefinedTraps : List Signal :=
   [.SIGKILL, .SIGSTOP]
 
+/-- Ref: signal.lem:stopped_signals — Signals indicating a stopped process. -/
 def Signal.stoppedSignals : List Signal :=
   [.SIGTSTP, .SIGSTOP, .SIGTTIN, .SIGTTOU]
 
 /-! # String <-> Signal conversion -/
 
+/-- Ref: signal.lem:string_of_signal — Convert signal to short name (e.g., `SIGINT` → `"INT"`). -/
 def Signal.toString : Signal → String
   | .EXIT    => "EXIT"
   | .SIGABRT => "ABRT"
@@ -78,9 +85,11 @@ def Signal.toString : Signal → String
 instance : Std.ToFormat Signal where
   format s := s.toString
 
+/-- Ref: signal_platform.lem:uppercase_char — Convert lowercase letter to uppercase. -/
 def uppercaseChar (c : Char) : Char :=
   if 'a' ≤ c && c ≤ 'z' then Char.ofNat (c.toNat - 32) else c
 
+/-- Ref: signal.lem:signal_of_string — Parse signal name (case-insensitive, optional SIG prefix). -/
 def Signal.ofString (s : String) : Option Signal :=
   -- Convert to uppercase, remove SIG prefix
   let s' := String.ofList (s.toList.map uppercaseChar)
@@ -118,6 +127,7 @@ def Signal.ofString (s : String) : Option Signal :=
 
 /-! # Platform signal numbers (stubbed) -/
 
+/-- Ref: signal_platform.lem:ocaml_signal_of_signal — Map signal to platform (Linux) signal number. -/
 def Signal.platformInt : Signal → Nat
   | .EXIT    => 0
   | .SIGHUP  => 1
@@ -154,6 +164,7 @@ inductive SignalBehavior where
   | continue_                             -- C
   deriving Repr, BEq
 
+/-- Ref: signal.lem:signal_default_behavior — POSIX default disposition for each signal. -/
 def Signal.defaultBehavior : Signal → SignalBehavior
   | .EXIT    => .ignore
   | .SIGABRT => .terminate true

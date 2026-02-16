@@ -1,0 +1,11 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"trap"},
+{"tag":"F"},
+{"tag":"S","v":"exit"},
+{"tag":"F"},
+{"tag":"S","v":"INT"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"trap"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"true; kill "},
+{"tag":"K","v":{"tag":"Escape","character":"-"}},
+{"tag":"S","v":"s INT $$"}]}},
+{"tag":"F"},
+{"tag":"S","v":"EXIT"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"false"}],"rs":[]}}

@@ -1,0 +1,13 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"exec"}],"rs":[{"tag":"Dup","ty":"ToFD","src":3,"tgt":[{"tag":"S","v":"1"}]}]},"r":{"tag":"Pipe","bg":false,"cs":[{"tag":"Subshell","c":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"trap"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[]}},
+{"tag":"F"},
+{"tag":"S","v":"PIPE"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"sleep"},
+{"tag":"F"},
+{"tag":"S","v":"1"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"command"},
+{"tag":"F"},
+{"tag":"S","v":"times"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"?="},
+{"tag":"K","v":{"tag":"Param","var":"?","fmt":{"tag":"Normal"}}}],"rs":[{"tag":"Dup","ty":"ToFD","src":1,"tgt":[{"tag":"S","v":"3"}]}]}},"ers":[],"rs":[]},
+{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"true"}],"rs":[]}]}}

@@ -1,0 +1,11 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[{"var":"err","value":[{"tag":"K","v":{"tag":"Backtick","stmt":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"-c"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"K","v":{"tag":"Escape","character":":"}},
+{"tag":"S","v":" ${}"}]}}],"rs":[{"tag":"Dup","ty":"ToFD","src":2,"tgt":[{"tag":"S","v":"1"}]},
+{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"/dev/null"}]}]}}}]}],"args":[],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"["},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"K","v":{"tag":"Param","var":"err","fmt":{"tag":"Normal"}}}]}},
+{"tag":"F"},
+{"tag":"S","v":"]"}],"rs":[]}}

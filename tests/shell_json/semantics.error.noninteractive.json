@@ -1,0 +1,12 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"Heredoc","ty":"XHere","src":0,"w":[{"tag":"S","v":"unset x\ny"},
+{"tag":"K","v":{"tag":"Escape","character":"="}},
+{"tag":"S","v":"z\necho "},
+{"tag":"K","v":{"tag":"Param","var":"x","fmt":{"tag":"Error","w":[{"tag":"S","v":"z"}]}}},
+{"tag":"S","v":"\necho blargh\n"}]},
+{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"script"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"chmod"},
+{"tag":"F"},
+{"tag":"S","v":"+x"},
+{"tag":"F"},
+{"tag":"S","v":"script"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"script"}],"rs":[]}}

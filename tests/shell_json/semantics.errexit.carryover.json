@@ -1,0 +1,9 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"set"},
+{"tag":"F"},
+{"tag":"S","v":"-e"}],"rs":[]},"r":{"tag":"Defun","name":"putsn","body":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"K","v":{"tag":"Param","var":"@","fmt":{"tag":"Normal"}}}]}}],"rs":[]}}},"r":{"tag":"And","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"false"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"true"}],"rs":[]}}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"putsn"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"It should be executed"}]}}],"rs":[]}},"r":{"tag":"And","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"false"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"true"}],"rs":[]}}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"/bin/echo"},
+{"tag":"F"},
+{"tag":"S","v":"hello"}],"rs":[]}}

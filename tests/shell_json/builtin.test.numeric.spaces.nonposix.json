@@ -1,0 +1,7 @@
+{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"test"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":" 5"}]}},
+{"tag":"F"},
+{"tag":"S","v":"-eq"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":" 5 "}]}}],"rs":[]}

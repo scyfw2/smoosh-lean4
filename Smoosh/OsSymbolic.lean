@@ -1,6 +1,12 @@
 /-
   Smoosh.OsSymbolic — Symbolic filesystem, processes, and OS instance
-  Translated from os_symbolic.lem (866 lines)
+  Translated from `os_symbolic.lem` (866 lines).
+
+  Provides the symbolic `OS` instance used for test execution:
+  - `SymbolicFS`: in-memory filesystem with files and directories
+  - `SymbolicProc`: process table with stdin/stdout/stderr FDs
+  - `osWaitpid`: symbolic process stepping (runs subshells to completion)
+  - `osExecve`: symbolic command execution (stubbed for external commands)
 -/
 import Smoosh.Os
 
@@ -628,14 +634,34 @@ instance : OS Symbolic where
     let sym2 := { sym1 with shFds := fds2 }
     .inr ({ os with symbolic := sym2 }, fdRead, fdWrite)
 
-  osOpenFileForRedir os _ty ss :=
-    -- OCaml: always succeeds, just allocates a Path FD.
-    -- Does NOT check if file exists or try to create it.
-    let fd := symbolicFreshFd os.symbolic.shFds
+  osOpenFileForRedir os ty ss :=
     let (_, _, sfile) := concretize os ss
-    let sym' := { os.symbolic with
-      shFds := os.symbolic.shFds ++ [(fd, .path sfile)] }
-    ( { os with symbolic := sym' }, .inr fd )
+    -- For From redirects, check if file exists in the symbolic filesystem.
+    -- Real shells fail when trying to redirect input from a nonexistent file.
+    -- Special device files (/dev/null, /dev/stdin, etc.) are always considered to exist.
+    let isDeviceFile := sfile.startsWith "/dev/"
+    match ty with
+    | .from_ =>
+      if isDeviceFile then
+        -- /dev/null, /dev/stdin etc. — always succeed
+        let fd := symbolicFreshFd os.symbolic.shFds
+        let sym' := { os.symbolic with
+          shFds := os.symbolic.shFds ++ [(fd, .path sfile)] }
+        ( { os with symbolic := sym' }, .inr fd )
+      else
+        match symbolicFsResolvePath os.symbolic.fsRoot sfile with
+        | some _ =>
+          let fd := symbolicFreshFd os.symbolic.shFds
+          let sym' := { os.symbolic with
+            shFds := os.symbolic.shFds ++ [(fd, .path sfile)] }
+          ( { os with symbolic := sym' }, .inr fd )
+        | none =>
+          ( os, .inl (sfile ++ ": No such file or directory") )
+    | _ =>
+      let fd := symbolicFreshFd os.symbolic.shFds
+      let sym' := { os.symbolic with
+        shFds := os.symbolic.shFds ++ [(fd, .path sfile)] }
+      ( { os with symbolic := sym' }, .inr fd )
   osOpenHeredoc os s :=
     let fifoIdx := os.symbolic.fifos.length
     let fd := symbolicFreshFd os.symbolic.shFds

@@ -1,0 +1,5 @@
+{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"trap"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"(false) && echo BUG"}]}},
+{"tag":"F"},
+{"tag":"S","v":"EXIT"}],"rs":[]}

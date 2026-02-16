@@ -1,0 +1,4 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"Heredoc","ty":"XHere","src":0,"w":[{"tag":"S","v":"echo "},
+{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"K","v":{"tag":"Escape","character":"$"}},
+{"tag":"S","v":"var\n"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"Heredoc","ty":"Here","src":0,"w":[{"tag":"S","v":"echo \\\\\\$var\n"}]}]}}

@@ -1,6 +1,10 @@
 /-
   Smoosh.Command — Builtins, path resolution, command execution
-  Translated from command.lem (2816 lines)
+  Translated from `command.lem` (2816 lines).
+
+  Contains all shell builtin implementations (`echo`, `cd`, `export`, `trap`, `printf`, etc.),
+  command name resolution (PATH lookup, special/regular builtins, functions),
+  and the `runCommand` dispatch function. Also handles `getopts`, `fc`, and `set`.
 -/
 import Smoosh.Semantics
 import Smoosh.Test
@@ -424,13 +428,20 @@ def builtinTrap (s : OsState α) (argv : List SymbolicString) (_env : Env) :
 
   else if printTraps || args'.isEmpty then
     -- trap -p or just trap: print traps
+    -- In a subshell, use parent's traps (supershellTraps) for display
     -- If args present, print specific signals
     let sigsToPrint :=
       if args'.isEmpty then Signal.allSignals
       else args'.filterMap (fun ss => tryConcrete ss >>= Signal.ofString)
 
+    -- Use supershellTraps if available (in subshell), otherwise current traps
+    let trapsToDisplay :=
+      match s.sh.supershellTraps with
+      | some superTraps => superTraps
+      | none => s.sh.traps
+
     let s' := sigsToPrint.foldl (fun os sig =>
-      match os.sh.traps.find? (fun (S, _) => S == sig) with
+      match trapsToDisplay.find? (fun (S, _) => S == sig) with
       | some (_, handler) =>
         let hStr := match tryConcrete handler with | some h => h | none => ""
         writeStdout (s!"trap -- '{hStr}' {sig.toString}\n") os
@@ -446,6 +457,8 @@ def builtinTrap (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     -- If action is -, reset.
     -- If action is integer, it's a signal and we assume reset (if valid int/sig).
     -- Simplified logic matching smoosh semantics.lem somewhat:
+    -- Clear supershell traps when modifying traps (matching OCaml behavior)
+    let s := clearSupershellTraps s
     match args' with
     | [] => .inl (s, "trap: missing arguments")
     | handlerSS :: sigsSS =>
@@ -499,12 +512,17 @@ def builtinAlias (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     let s' := args.foldl (fun os arg =>
       match tryConcrete arg with
       | some astr =>
-        let parts := splitStringOn false '=' astr
-        match parts with
-        | [name, val] =>
-          { os with sh := { os.sh with aliases :=
-            (name, val) :: os.sh.aliases.filter (fun (n, _) => n != name) } }
-        | _ => os
+        -- Split on first '=' to get name and value
+        -- Use String.splitOn which preserves empty trailing parts
+        -- Only treat as assignment if '=' is present
+        if astr.contains '=' then
+          match astr.splitOn "=" with
+          | name :: valParts =>
+            let val := String.intercalate "=" valParts
+            { os with sh := { os.sh with aliases :=
+              (name, val) :: os.sh.aliases.filter (fun (n, _) => n != name) } }
+          | _ => os
+        else os
       | none => os) s
     .inr (exitWith 0 s', .done, false)
 
@@ -1095,11 +1113,26 @@ def builtinRm (s : OsState α) (argv : List SymbolicString) (_env : Env) :
   -- Mock: just succeed
   .inr (s, .done, false)
 
+/-- Read all content from stdin and write to stdout, line by line,
+    used by builtinCat when called without file arguments. -/
+partial def catReadStdin (s : OsState α) : OsState α :=
+  let (s1, (line, _rest, eof)) := OS.osReadLineFd s STDIN .escapeOff
+  match eof with
+  | .hitEof =>
+    if line.isEmpty then s1
+    else writeStdout line s1
+  | .noEof =>
+    let s2 := writeStdout (line ++ "\n") s1
+    catReadStdin s2
+
 def builtinCat (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  match argv with
-  | [] => .inr (s, .done, false) -- TODO: read stdin?
-  | _ :: args =>
+  let args := match argv with | [] => [] | _ :: rest => rest
+  if args.isEmpty then
+    -- No file arguments: read stdin and write to stdout (like real cat)
+    let s' := catReadStdin s
+    .inr (exitWith 0 s', .done, false)
+  else
     let (s'', failed) := args.foldl (fun (acc : OsState α × Bool) arg =>
       let (os, failed) := acc
       match tryConcrete arg with
@@ -1236,7 +1269,19 @@ def runCommand (s : OsState α) (opts : CommandOpts) (checked : CheckingMode) (p
             let (s3, _) := popLocals s2'
             .inr (s3, stmt1, restore)
         | none =>
-          -- Step 4: External command
+          -- Step 4: Alias lookup
+          match s.sh.aliases.find? (fun (n, _) => n == prog) with
+          | some (_, expansion) =>
+            if expansion.isEmpty then
+              -- Empty alias: no-op (e.g., alias empty='')
+              .inr (exitWith 0 s, .done, true)
+            else
+              -- Non-empty alias: treat expansion as command
+              -- Re-parse the expansion string and run it
+              let stmt := parseTrapString expansion
+              .inr (s, stmt, true)
+          | none =>
+          -- Step 5: External command
           let (s1, mpath) := resolveCommandName s prog
           match mpath with
           | none =>

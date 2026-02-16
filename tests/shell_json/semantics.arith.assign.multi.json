@@ -1,0 +1,9 @@
+{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":":"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Arith","f":[],"w":[{"tag":"S","v":"x = y = z = 0"}]}}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"x","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"y","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"z","fmt":{"tag":"Normal"}}}],"rs":[]}}

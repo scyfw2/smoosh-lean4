@@ -1,0 +1,6 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"set"},
+{"tag":"F"},
+{"tag":"S","v":"-e"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"alias"},
+{"tag":"F"},
+{"tag":"S","v":"empty="},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[]}}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"empty"}],"rs":[]}}

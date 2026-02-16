@@ -1,6 +1,11 @@
 /-
-  Smoosh.Test — POSIX test/[ expression parsing and evaluation
-  Translated from test.lem (275 lines)
+  Smoosh.Test — POSIX `test`/`[` expression parsing and evaluation
+  Translated from `test.lem` (275 lines).
+
+  Implements two parsing strategies:
+  1. POSIX algorithm-based parsing (0–4 argument cases)
+  2. Recursive-descent parsing (5+ arguments)
+  Supports unary file tests, string/numeric comparisons, and logical connectives.
 -/
 import Smoosh.Os
 
@@ -265,9 +270,9 @@ def parseUnaryTest (op arg : String) : Except String TestExpr :=
   | "-z" => .ok (.testEmptyStr arg)
   | _ => .error s!"unknown unary operator {op}"
 
-/-- POSIX algorithm-based test expression parsing.
-    For 0-4 arguments, uses the POSIX standardized algorithm.
-    For 4+ arguments, uses the recursive descent parser. -/
+/-- Ref: test.lem:parse_test_expr — POSIX algorithm-based test expression parsing.
+    For 0–4 arguments, uses the POSIX standardized algorithm.
+    For 5+ arguments, uses the recursive descent parser. -/
 partial def parseTestExpr (toks : List String) : Except String TestExpr :=
   match toks with
   -- 0 args: exit false (represented as empty string test)

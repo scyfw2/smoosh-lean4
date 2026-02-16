@@ -1,6 +1,10 @@
 /-
   Smoosh.Pattern — Pattern parsing and matching
-  Translated from pattern.lem (407 lines)
+  Translated from `pattern.lem` (407 lines).
+
+  Implements POSIX glob pattern parsing (brackets, `?`, `*`, literals) and
+  matching against symbolic strings. Used by both pathname expansion (`SmooshPath`)
+  and `case` statement pattern matching.
 -/
 import Smoosh.Prelude
 
@@ -60,6 +64,7 @@ def stringOfPattern (p : Pattern') : String :=
 
 /-! # Pattern parsing -/
 
+/-- Ref: pattern.lem:parse_bracket_terminator — Parse a single bracket entry terminator character. -/
 def parseBracketTerminator (pat : SymbolicString) (term : Char) : Except String (SymbolicString × List Char) :=
   match pat with
   | [] => .error "expected bracket terminator, found end-of-pattern"
@@ -90,6 +95,7 @@ def parseBracketChar (pat : SymbolicString) : Except String (SymbolicString × B
   | .q c :: pat' => .ok (pat', .char_ c)
   | .sym _ :: pat' => parseBracketChar pat' -- Skip symbols
 
+/-- Ref: pattern.lem:parse_bracket_entries — Parse bracket entries (char classes, ranges, literals). -/
 partial def parseBracketEntries (pat : SymbolicString) : Except String (SymbolicString × List BracketEntry) :=
   match pat with
   | [] => .error "expected bracket entries, found end-of-pattern"
@@ -108,6 +114,7 @@ partial def parseBracketEntries (pat : SymbolicString) : Except String (Symbolic
 
 def bracketInitialLiteral (c : Char) : Bool := c == ']' || c == '-'
 
+/-- Ref: pattern.lem:parse_bracket — Parse a full bracket expression `[...]` or `[!...]`. -/
 partial def parseBracket (pat : SymbolicString) : Except String (SymbolicString × PatternChar) :=
   match pat with
   | [] => .error "unterminated bracket, found end-of-pattern"
@@ -145,6 +152,7 @@ partial def parseBracket (pat : SymbolicString) : Except String (SymbolicString 
         | .ok (restPat, es) => .ok (restPat, .bracket true es)
   | .sym _ :: pat' => parseBracket pat'
 
+/-- Ref: pattern.lem:parse_pattern_loop — Parse a pattern string into a list of `PatternChar`. -/
 partial def parsePatternLoop (pat : SymbolicString) : Except String (SymbolicString × Pattern') :=
   match pat with
   | [] => .ok ([], [])
@@ -186,6 +194,7 @@ partial def parsePatternLoop (pat : SymbolicString) : Except String (SymbolicStr
     .ok (rest, .lit c :: pcs)
   | .sym _ :: pat' => parsePatternLoop pat' -- Skip symbols
 
+/-- Ref: pattern.lem:parse_pattern — Parse a complete pattern (calls `parsePatternLoop` and checks for full consumption). -/
 def parsePattern (pat : SymbolicString) : Except String Pattern' :=
   match parsePatternLoop pat with
   | .error err => .error err
@@ -209,6 +218,7 @@ def matchEntry (lc : Locale) (c : Char) (be : BracketEntry) : Bool :=
     | some rlo, some rhi => lc.range c rlo rhi
     | _, _ => false
 
+/-- Ref: pattern.lem:match_exact_pattern — Match a parsed pattern against a symbolic string. -/
 partial def matchExactPattern (lc : Locale) (pat : Pattern') (s : SymbolicString) : MatchResult SymbolicString :=
   let rec matchStar (lc : Locale) (pat' : Pattern') : SymbolicString → MatchResult SymbolicString
     | [] => matchExactPattern lc pat' []
@@ -247,6 +257,7 @@ partial def matchExactPattern (lc : Locale) (pat : Pattern') (s : SymbolicString
   | _, .sym _ :: _ => .symbolic
   | _ :: _, [] => .noMatch
 
+/-- Ref: pattern.lem:match_exact — Parse and match a pattern against a string. -/
 def matchExact (lc : Locale) (pat s : SymbolicString) : MatchResult SymbolicString :=
   match parsePattern (pat.filter fun | .sym _ => false | _ => true) with
   | .error _ => .noMatch

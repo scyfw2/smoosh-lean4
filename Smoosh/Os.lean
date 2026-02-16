@@ -1,6 +1,14 @@
 /-
   Smoosh.Os — OS state, OS typeclass, parameters, logging, jobs, redirects
-  Translated from os.lem (1476 lines)
+  Translated from `os.lem` (1476 lines).
+
+  Defines the `OS` typeclass (the interface for filesystem and process operations),
+  `OsState` (the concrete state threaded through evaluation), and operations for:
+  - Parameter lookup/set, variable/function management
+  - Job control, pipes, and process management
+  - Redirections and FD management
+  - Traps and signal handling
+  - Logging and tracing
 -/
 import Smoosh.Prelude
 
@@ -322,6 +330,9 @@ def clearTrapsForSubshell (os : OsState α) : OsState α × List Signal :=
       traps := ignored,
       supershellTraps := some os.sh.traps } },
    handled.map (fun (sig, _) => sig))
+
+def clearSupershellTraps (os : OsState α) : OsState α :=
+  { os with sh := { os.sh with supershellTraps := none } }
 
 /-! # Concretize helpers -/
 

@@ -1,0 +1,11 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"[]"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"K","v":{"tag":"Escape","character":"["}},
+{"tag":"K","v":{"tag":"Escape","character":"]"}}]}}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"K","v":{"tag":"Escape","character":"["}},
+{"tag":"K","v":{"tag":"Escape","character":"]"}}]}}],"rs":[]}}

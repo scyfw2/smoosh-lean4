@@ -1,0 +1,7 @@
+{"tag":"Semi","l":{"tag":"Not","c":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"test"},
+{"tag":"F"},
+{"tag":"S","v":"-t"},
+{"tag":"F"},
+{"tag":"S","v":"12323454234578326584376438"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"ok"}],"rs":[]}}

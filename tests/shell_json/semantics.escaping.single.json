@@ -1,0 +1,10 @@
+{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"Heredoc","ty":"XHere","src":0,"w":[{"tag":"S","v":"line one\nline two\n\"line\"."},
+{"tag":"K","v":{"tag":"Escape","character":"$"}},
+{"tag":"S","v":"{PATH}."},
+{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"K","v":{"tag":"Escape","character":"'"}},
+{"tag":"S","v":"three"},
+{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"K","v":{"tag":"Escape","character":"'"}},
+{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"S","v":"xline four\n"}]}]}

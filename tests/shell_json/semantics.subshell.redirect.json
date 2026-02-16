@@ -1,0 +1,5 @@
+{"tag":"Subshell","c":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"trap"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"echo foo"}]}},
+{"tag":"F"},
+{"tag":"S","v":"EXIT"}],"rs":[]},"ers":[],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"/dev/null"}]}]}

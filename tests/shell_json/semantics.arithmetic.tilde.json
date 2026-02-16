@@ -1,0 +1,4 @@
+{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Arith","f":[],"w":[{"tag":"S","v":"~"},
+{"tag":"S","v":"10"}]}}],"rs":[]}

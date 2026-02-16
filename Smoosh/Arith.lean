@@ -1,6 +1,10 @@
 /-
   Smoosh.Arith — Arithmetic expression lexer, parser, and evaluator
-  Translated from arith.lem (657 lines)
+  Translated from `arith.lem` (657 lines).
+
+  Implements the `$(( ))` shell arithmetic subsystem:
+  - Lexer (`lexer`), recursive-descent parser (`parseArith`), and evaluator (`evalArith`).
+  - Supports C-style operators: `++`, `--`, ternary `?:`, bitwise, boolean, relational, assignment.
 -/
 import Smoosh.Num
 import Smoosh.Prelude
@@ -66,6 +70,7 @@ def span' (f : Char → Bool) : List Char → List Char × List Char
       (c :: s, rst)
     else ([], c :: cs)
 
+/-- Ref: arith.lem:lexer — Tokenize an arithmetic expression string into `ArithToken` list. -/
 partial def lexer (str : List Char) : Except String (List ArithToken) :=
   match str with
   | [] => .ok []
@@ -315,6 +320,7 @@ partial def parsePrimary (tkns : List ArithToken) : Except String (ArithExp × L
   | _ => .error "unexpected token in arithmetic expression"
 end
 
+/-- Ref: arith.lem:parse_arith — Parse a string into an `ArithExp` AST. -/
 def parseArith (s : String) : Except String ArithExp := do
   let tkns ← lexer s.toList
   let (e, rest) ← parseAssignment tkns

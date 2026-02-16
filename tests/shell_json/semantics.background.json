@@ -1,0 +1,9 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"hi"}],"rs":[]},"r":{"tag":"Background","c":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"sleep"},
+{"tag":"F"},
+{"tag":"S","v":"1"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"derp"}],"rs":[]}},"ers":[],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"bye"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"wait"}],"rs":[]}}

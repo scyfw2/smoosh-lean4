@@ -1,16 +1,20 @@
 /-
   Smoosh.Fields — Field splitting, pathname expansion, and quote removal
-  Translated from fields.lem (253 lines)
+  Translated from `fields.lem` (253 lines).
+
+  Implements IFS-based field splitting, pathname expansion via globs, and POSIX quote removal.
 -/
 import Smoosh.Os
 import Smoosh.SmooshPath
 
 /-! # Field splitting helpers -/
 
+/-- Ref: fields.lem helpers — True if `c` is an IFS-whitespace char (space/newline/tab). -/
 def isWs (c : Char) : Bool := c ∈ [' ', '\n', '\t']
 
 /-! # Collect non-IFS characters -/
 
+/-- Ref: fields.lem helpers — Collect consecutive non-IFS characters into a field. -/
 def collectNonIfs (ifs : List Char) : List Char → List Char × List Char
   | [] => ([], [])
   | c :: cs =>
@@ -21,6 +25,7 @@ def collectNonIfs (ifs : List Char) : List Char → List Char × List Char
 
 -- OCaml: split_expstring ifs clst produces IntermediateFields with WFS/FS/Field distinction.
 -- WFS for IFS whitespace chars, FS for non-whitespace IFS delimiters, Field for data.
+/-- Ref: fields.lem:split_expstring — Split expanded string by IFS into intermediate fields. -/
 partial def splitExpstring (ifs : List Char) (clst : List Char) : IntermediateFields :=
   match clst with
   | [] => []
@@ -35,6 +40,7 @@ partial def splitExpstring (ifs : List Char) (clst : List Char) : IntermediateFi
 
 -- OCaml: split_word ifs (f, expanded_words) where f is IntermediateFields accumulator.
 -- Matching OCaml's (intermediate_fields * expanded_words) pair.
+/-- Ref: fields.lem:split_word — Split word list by IFS, accumulating intermediate fields. -/
 partial def splitWord (ifs : List Char) : IntermediateFields × ExpandedWords → IntermediateFields
   | (f, []) => f
   | (f, .usrF :: .usrF :: wrds) => splitWord ifs (f, .usrF :: wrds)
@@ -53,6 +59,7 @@ partial def splitWord (ifs : List Char) : IntermediateFields × ExpandedWords �
 
 /-! # Concat expanded words -/
 
+/-- Ref: fields.lem:concat_expanded — Concatenate expanded words into a symbolic string (no splitting). -/
 def concatExpanded : ExpandedWords → SymbolicString
   | [] => symbolicStringOfString ""
   | .usrF :: ws => symbolicStringOfString " " ++ concatExpanded ws
@@ -66,6 +73,7 @@ def concatExpanded : ExpandedWords → SymbolicString
 
 -- OCaml: skip_field_splitting collapses UsrF::UsrF, turns UsrF into FS,
 -- and uses QField (not Field) for DQuo/At.
+/-- Ref: fields.lem:skip_field_splitting — Convert expanded words to intermediate fields without IFS splitting. -/
 partial def skipFieldSplitting : ExpandedWords → IntermediateFields
   | [] => []
   | .usrF :: .usrF :: ws => skipFieldSplitting (.usrF :: ws)
@@ -84,6 +92,7 @@ partial def skipFieldSplitting : ExpandedWords → IntermediateFields
 
 -- OCaml: combine_fields merges adjacent Field/QField and normalizes WFS/FS.
 -- Key cases: Field++Field, QField++QField, QField++Field (escape_patterns), Field++QField (escape_patterns).
+/-- Ref: fields.lem:combine_fields — Merge adjacent fields and normalize whitespace separators. -/
 partial def combineFields : IntermediateFields → IntermediateFields
   | [] => []
   | [.wfs] => []
@@ -100,12 +109,14 @@ partial def combineFields : IntermediateFields → IntermediateFields
 /-! # Clean fields -/
 
 -- OCaml: clean_fields strips leading WFS, then calls combine_fields.
+/-- Ref: fields.lem:clean_fields — Strip leading whitespace, then combine fields. -/
 partial def cleanFields : IntermediateFields → IntermediateFields
   | .wfs :: rst => cleanFields rst
   | other => combineFields other
 
 /-! # Full field splitting -/
 
+/-- Ref: fields.lem:field_splitting — Main field splitting entry: IFS-aware splitting. -/
 def fieldSplitting {α : Type} [OS α] (os : OsState α) (expWords : ExpandedWords) : IntermediateFields :=
   match lookupConcreteParam os "IFS" with
   | none => cleanFields (splitWord [' ', '\n', '\t'] ([], expWords))
@@ -115,6 +126,7 @@ def fieldSplitting {α : Type} [OS α] (os : OsState α) (expWords : ExpandedWor
 /-! # Pathname expansion -/
 
 -- OCaml: needs_expansion checks if pattern chars exist (optimization)
+/-- Ref: fields.lem:needs_expansion — Check if pattern chars exist (glob optimization). -/
 def needsExpansion : SymbolicString → Bool
   | [] => false
   | [.c '['] => false  -- kludge for a bare [
@@ -124,12 +136,14 @@ def needsExpansion : SymbolicString → Bool
   | _ :: ss => needsExpansion ss
 
 -- OCaml: insert_field_separators interleaves FS between expanded path matches
+/-- Ref: fields.lem:insert_field_separators — Interleave FS between expanded path matches. -/
 def insertFieldSeparators : List String → IntermediateFields
   | [] => []
   | [f] => [.field (symbolicStringOfString f)]
   | f :: fs => .field (symbolicStringOfString f) :: .fs :: insertFieldSeparators fs
 
 -- OCaml: pathname_expansion only expands unquoted Field entries
+/-- Ref: fields.lem:pathname_expansion — Expand unquoted Field entries using glob matching. -/
 def pathnameExpansion {α : Type} [OS α] (os : OsState α) (ifs : IntermediateFields) : IntermediateFields :=
   if os.sh.opts.any (· == .noglob) then ifs
   else
@@ -150,12 +164,14 @@ def pathnameExpansion {α : Type} [OS α] (os : OsState α) (ifs : IntermediateF
 
 /-! # Quote removal -/
 
+/-- Ref: fields.lem:remove_quotes — Convert qfield to field (remove quote markers). -/
 def removeQuotes : IntermediateFields → IntermediateFields
   | [] => []
   | .qfield s :: rst => .field s :: removeQuotes rst
   | f :: rst => f :: removeQuotes rst
 
 -- OCaml: to_fields handles FS::FS producing empty fields
+/-- Ref: fields.lem:to_fields — Convert intermediate fields to final fields list. -/
 def toFields : IntermediateFields → Fields
   | [] => []
   | .field fs :: rst => fs :: toFields rst
@@ -169,6 +185,7 @@ def finalizeFields : IntermediateFields → Fields
   | .fs :: rst => symbolicStringOfString "" :: finalizeFields rst
   | other => toFields other
 
+/-- Ref: fields.lem:quote_removal — Full pipeline: remove quotes, combine, and finalize fields. -/
 def quoteRemoval (f : IntermediateFields) : Fields :=
   let noQuotes := combineFields (removeQuotes f)
   finalizeFields noQuotes

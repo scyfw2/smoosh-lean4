@@ -1,0 +1,11 @@
+{"tag":"Case","args":[{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"foo"},
+{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"S","v":"\nbar"}]}}],"cases":[{"pats":[[{"tag":"S","v":"foo"},
+{"tag":"K","v":{"tag":"Escape","character":"\\"}},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"\n"}]}},
+{"tag":"S","v":"bar"}]],"stmt":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"good"}],"rs":[]}},
+{"pats":[[{"tag":"S","v":"*"}]],"stmt":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"bad"}],"rs":[]}}]}

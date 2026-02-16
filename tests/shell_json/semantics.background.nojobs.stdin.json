@@ -1,0 +1,6 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"cat"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"scr"}]},
+{"tag":"Heredoc","ty":"XHere","src":0,"w":[{"tag":"S","v":"set +m\nexec <in\ncat &\nwait\n"}]}]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"illegible"}],"rs":[{"tag":"File","ty":"To","src":1,"tgt":[{"tag":"S","v":"in"}]}]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"K","v":{"tag":"Param","var":"TEST_SHELL","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"S","v":"scr"}],"rs":[]}}

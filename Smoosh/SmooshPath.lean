@@ -1,6 +1,8 @@
 /-
   Smoosh.SmooshPath — Pathname expansion / globbing
-  Translated from path.lem (102 lines)
+  Translated from `path.lem` (102 lines).
+
+  Implements directory walking and glob pattern matching against symbolic filesystem entries.
 -/
 import Smoosh.Os
 import Smoosh.Pattern
@@ -14,20 +16,24 @@ structure PathInfo where
 
 /-! # Path utilities -/
 
+/-- Ref: path.lem:has_leading_dot — Check if filename starts with '.'. -/
 def hasLeadingDot : List Char → Bool
   | '.' :: _ => true
   | _ => false
 
+/-- Ref: path.lem:has_trailing_slash — Check if path ends with '/'. -/
 def hasTrailingSlash (cs : List Char) : Bool :=
   match cs.reverse with
   | '/' :: _ => true
   | _ => false
 
+/-- Ref: path.lem:split_on_slash — Split path components on '/'. -/
 def splitOnSlash (cs : List Char) : List (List Char) :=
   splitOn false '/' cs
 
 /-! # Path pattern parsing -/
 
+/-- Ref: path.lem:parse_path_pattern — Parse glob pattern into (components, starting dir, path info). -/
 def parsePathPattern {α : Type} [OS α] (os : OsState α) (pat : String) : List String × Path × PathInfo :=
   match pat.toList with
   | '/' :: pat' =>
@@ -41,6 +47,7 @@ def parsePathPattern {α : Type} [OS α] (os : OsState α) (pat : String) : List
 
 /-! # Pattern file matching -/
 
+/-- Ref: path.lem:match_pattern_file_list — Match glob pattern against directory listing. -/
 def matchPatternFileList {α : Type} [OS α] (os : OsState α) (lc : Locale) (dir : Path) (pat : String) : List (String × FileUnit) :=
   let entries := OS.osReaddir os dir
   entries.filterMap (fun (name, file) =>
@@ -52,6 +59,7 @@ def matchPatternFileList {α : Type} [OS α] (os : OsState α) (lc : Locale) (di
       else none
     | _ => none)
 
+/-- Ref: path.lem:match_dir — Match a single path component in a directory ('.', '..', or pattern). -/
 def matchDir {α : Type} [OS α] (os : OsState α) (dir : Path) (lc : Locale) (name : String) : List (String × FileUnit) :=
   match name with
   | "" => [("", .dir dir)]
@@ -61,6 +69,7 @@ def matchDir {α : Type} [OS α] (os : OsState α) (dir : Path) (lc : Locale) (n
 
 /-! # Directory walking -/
 
+/-- Ref: path.lem:walk — Recursively walk directory tree matching path pattern components. -/
 partial def walk {α : Type} [OS α] (os : OsState α) (pathSoFar : Option Path) (dir : Path)
     (pinfo : PathInfo) (lc : Locale) : List String → List (String × FileUnit)
   | [] =>
@@ -83,6 +92,7 @@ partial def walk {α : Type} [OS α] (os : OsState α) (pathSoFar : Option Path)
 
 /-! # Main match_path function -/
 
+/-- Ref: path.lem:match_path — Main entry: glob a path pattern, returning sorted list of matches. -/
 def matchPath {α : Type} [OS α] (os : OsState α) (path : String) : List Path :=
   let (pat, start, pinfo) := parsePathPattern os path
   let results := walk os none start pinfo os.sh.locale pat

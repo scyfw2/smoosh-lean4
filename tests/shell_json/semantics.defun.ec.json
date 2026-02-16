@@ -1,0 +1,9 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"false"}],"rs":[]},"r":{"tag":"Defun","name":"f","body":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"hi"}],"rs":[]}}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"?","fmt":{"tag":"Normal"}}}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"f"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"false"}],"rs":[]}},"r":{"tag":"Defun","name":"f","body":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"hello"}],"rs":[]}}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"?","fmt":{"tag":"Normal"}}}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"f"}],"rs":[]}}

@@ -1,0 +1,5 @@
+{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[{"var":"x","value":[{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"  8"}]}}]}],"args":[],"rs":[]},"r":{"tag":"Command","assigns":[{"var":"y","value":[{"tag":"K","v":{"tag":"Arith","f":[],"w":[{"tag":"S","v":"x + 1"}]}}]}],"args":[],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"x","fmt":{"tag":"Normal"}}},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Param","var":"y","fmt":{"tag":"Normal"}}}],"rs":[]}}

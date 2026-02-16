@@ -1,0 +1,9 @@
+{"tag":"Semi","l":{"tag":"Defun","name":"f","body":{"tag":"Subshell","c":{"tag":"Semi","l":{"tag":"Semi","l":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"trap"},
+{"tag":"F"},
+{"tag":"K","v":{"tag":"Quote","f":[],"w":[{"tag":"S","v":"echo FOO"}]}},
+{"tag":"F"},
+{"tag":"S","v":"EXIT"}],"rs":[]},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"return"},
+{"tag":"F"},
+{"tag":"S","v":"5"}],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"echo"},
+{"tag":"F"},
+{"tag":"S","v":"BAR"}],"rs":[]}},"ers":[],"rs":[]}},"r":{"tag":"Command","assigns":[],"args":[{"tag":"S","v":"f"}],"rs":[]}}
