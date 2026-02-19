@@ -476,7 +476,7 @@ def CheckingMode.checkedExit : CheckingMode → Bool
 inductive WaitMode where | waitCommand | waitInternal
   deriving Repr, BEq
 
-inductive ParseStringMode where | parseEval | parseTrap
+inductive ParseStringMode where | parseEval | parseTrap | parseDot
   deriving Repr, BEq
 
 inductive ParseFileMode where | pushFile | noPushFile
@@ -1349,6 +1349,7 @@ def parseSourcePropagatesControl : ParseSource → Bool
   | .parseSTDIN => true
   | .parseString .parseEval _ => true
   | .parseString .parseTrap _ => false
+  | .parseString .parseDot _ => false
   | .parseFile _ _ => false
 
 /-! # Stmt helpers -/
@@ -1611,11 +1612,14 @@ partial def stringOfStmt : Stmt → String
   | .call _ _ _ _ c => stringOfStmt c
   | .evalLoop _ _ (.parseString .parseEval cmd) _ _ => "eval '" ++ cmd ++ "'"
   | .evalLoop _ _ (.parseString .parseTrap cmd) _ _ => "eval '" ++ cmd ++ "' # from trap"
+  | .evalLoop _ _ (.parseString .parseDot cmd) _ _ => ": source '" ++ cmd ++ "'"
   | .evalLoop _ _ _ _ _ => ": EvalLoop"
   | .evalLoopCmd _ _ (.parseString .parseEval cmd) _ _ c =>
     stringOfStmt c ++ " # in eval '" ++ cmd ++ "'"
   | .evalLoopCmd _ _ (.parseString .parseTrap cmd) _ _ c =>
     stringOfStmt c ++ " # in eval '" ++ cmd ++ "' from trap"
+  | .evalLoopCmd _ _ (.parseString .parseDot cmd) _ _ c =>
+    stringOfStmt c ++ " # in source '" ++ cmd ++ "'"
   | .evalLoopCmd _ _ _ _ _ c => stringOfStmt c
   | .break_ n => "break " ++ Nat.repr n
   | .continue_ n => "continue " ++ Nat.repr n

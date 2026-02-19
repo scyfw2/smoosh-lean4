@@ -185,11 +185,23 @@ def builtinCd (s : OsState α) (argv : List SymbolicString) (_env : Env) :
       | some d' => d'
       | none => "/"
     | _ => "/"
-  let (s', err) := OS.osChdir s dir
+  -- OCaml: do_cd step 7 — prepend PWD for relative paths
+  let curpath := if dir.startsWith "/" then dir
+                 else joinPath s.sh.cwd dir
+  -- OCaml: do_cd step 8 — canonicalize the path
+  let absDir := match canonicalizePath s curpath with
+    | some p => p
+    | none => curpath
+  let old := s.sh.cwd
+  let (s', err) := OS.osChdir s absDir
   match err with
   | none =>
-    let s'' := { s' with sh := { s'.sh with cwd := dir } }
-    .inr (exitWith 0 s'', .done, true)
+    -- Set PWD and OLDPWD
+    let s'' := match setParam "PWD" (symbolicStringOfString s'.sh.cwd) s' with
+      | .inr os => os
+      | .inl _ => s'
+    let s''' := internalSetParam "OLDPWD" (symbolicStringOfString old) s''
+    .inr (exitWith 0 s''', .done, true)
   | some msg => .inl (s', "cd: " ++ msg)
 
 def builtinPwd (s : OsState α) (_argv : List SymbolicString) (_env : Env) :
@@ -620,24 +632,32 @@ def builtinDot (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     match tryConcrete sfile with
     | none => .inl (s, "couldn't handle symbolic argument " ++ stringOfSymbolicString sfile)
     | some file =>
-      -- Check if file contains '/' and exists directly
-      let mpath :=
-        if file.toList.contains '/' && OS.osFileExists s file then
-          if OS.osIsReadable s file then Sum.inr file
-          else Sum.inl "unreadable"
-        else
-          match lookupConcreteParam s "PATH" with
-          | none => Sum.inl "no PATH"
-          | some pathvar =>
-            let paths := splitStringOn true ':' pathvar
-            match resolvePathWith (fun p => OS.osIsReadable s p) paths file with
-            | none => Sum.inl "not found"
-            | some path => Sum.inr path
+       -- Per POSIX: if file contains '/', search it directly; otherwise search PATH
+       let mpath :=
+         if file.toList.contains '/' then
+           if OS.osFileExists s file then
+             if OS.osIsReadable s file then Sum.inr file
+             else Sum.inl "unreadable"
+           else Sum.inl "not found"
+         else
+           match lookupConcreteParam s "PATH" with
+           | none => Sum.inl "not found"
+           | some pathvar =>
+             let paths := splitStringOn true ':' pathvar
+             match resolvePathWith (fun p => OS.osIsReadable s p) paths file with
+             | none => Sum.inl "not found"
+             | some path => Sum.inr path
       match mpath with
       | .inl msg => .inl (s, file ++ ": " ++ msg)
-      | .inr _path =>
-        -- File found but we can't parse/execute it (requires runtime parser)
-        .inl (s, file ++ ": source not implemented (requires runtime parser)")
+      | .inr path =>
+        -- Read file content from the OS (real or symbolic filesystem)
+        match OS.osReadFile s path with
+        | some content =>
+          -- Parse and execute the file content, like builtinEval does
+          let stmt := Stmt.evalLoop 1 (none, none) (.parseString .parseDot content) .noninteractive .subsidiary
+          .inr (s, stmt, true)
+        | none =>
+          .inl (s, file ++ ": cannot read file")
 
 def builtinEval (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
@@ -950,12 +970,7 @@ def builtinKill (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     | sigArg :: rest =>
       match tryConcrete sigArg with
       | some str =>
-        if str.startsWith "-" then
-          let sigName := (str.drop 1).toString
-          match Signal.ofString sigName with
-          | some sig => (sig, rest)
-          | none => (.SIGTERM, args)
-        else if str == "-s" then
+        if str == "-s" then
           match rest with
           | sigSS :: rest' =>
             match tryConcrete sigSS with
@@ -965,22 +980,32 @@ def builtinKill (s : OsState α) (argv : List SymbolicString) (_env : Env) :
               | none => (.SIGTERM, args)
             | none => (.SIGTERM, args)
           | _ => (.SIGTERM, args)
+        else if str.startsWith "-" then
+          let sigName := (str.drop 1).toString
+          match Signal.ofString sigName with
+          | some sig => (sig, rest)
+          | none => (.SIGTERM, args)
         else (.SIGTERM, args)
       | none => (.SIGTERM, args)
     | _ => (.SIGTERM, args)
   if targets.isEmpty then
     .inl (s, "kill: usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ...")
   else
-    let s' := targets.foldl (fun os tgt =>
+    let (s', allOk) := targets.foldl (fun (os, ok) tgt =>
       match tryConcrete tgt with
       | some pidStr =>
         match readNat pidStr.toList with
         | .ok pid =>
-          let (os', _) := OS.osSignalPid os signal pid false
-          os'
-        | .error _ => os
-      | none => os) s
-    .inr (exitWith 0 s', .done, false)
+          let (os', success) := OS.osSignalPid os signal pid false
+          if success then (os', ok)
+          else
+            let os'' := writeStderr (s!"kill: ({pidStr}) - No such process\n") os'
+            (os'', false)
+        | .error _ =>
+          let os' := writeStderr (s!"kill: {pidStr}: invalid signal specification\n") os
+          (os', false)
+      | none => (os, ok)) (s, true)
+    .inr (exitWith (if allOk then 0 else 1) s', .done, false)
 
 /-! # Exec builtin -/
 
@@ -1100,8 +1125,18 @@ def builtinHistory (s : OsState α) (_argv : List SymbolicString) (_env : Env) :
 
 def builtinMkdir (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  -- Stub: always succeed, do nothing (OS typeclass lacks mkdir)
-  .inr (exitWith 0 s, .done, false)
+  let args := match argv with | [] => [] | _ :: rest => rest
+  -- Parse -p flag
+  let (mkdirP, paths) := match args with
+    | flag :: rest => match tryConcrete flag with
+      | some "-p" => (true, rest)
+      | _ => (false, args)
+    | _ => (false, args)
+  let s' := paths.foldl (fun os arg =>
+    match tryConcrete arg with
+    | some path => (OS.osMkdir os path mkdirP).1
+    | none => os) s
+  .inr (exitWith 0 s', .done, false)
 
 def builtinSleep (s : OsState α) (_argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
@@ -1115,11 +1150,19 @@ def builtinTouch (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     let s' := args.foldl (fun os arg =>
       match tryConcrete arg with
       | some path =>
-        let (os', _) := OS.osOpenFileForRedir os RedirType.to (symbolicStringOfString path)
-        -- TODO: Update mtime if file exists
-        os'
+        -- Create/touch the file by writing empty content through the OS
+        -- This ensures the file appears in fsRoot for glob expansion
+        let (os1, fdResult) := OS.osOpenFileForRedir os RedirType.to (symbolicStringOfString path)
+        match fdResult with
+        | .inr fd =>
+          -- Write empty string to ensure file is created in fsRoot
+          let os2 := match OS.osWriteFd os1 fd "" with
+            | some os' => os'
+            | none => os1
+          OS.osCloseFd os2 fd
+        | .inl _ => os1
       | none => os) s
-    .inr (s', .done, false)
+    .inr (exitWith 0 s', .done, false)
 
 def builtinChmod (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
@@ -1133,8 +1176,19 @@ def builtinLn (s : OsState α) (argv : List SymbolicString) (_env : Env) :
 
 def builtinRm (s : OsState α) (argv : List SymbolicString) (_env : Env) :
     Sum (OsState α × String) (OsState α × Stmt × Bool) :=
-  -- Mock: just succeed
-  .inr (s, .done, false)
+  let args := match argv with | [] => [] | _ :: rest => rest
+  -- Parse -r/-rf/-f flags
+  let (recursive, paths) := args.foldl (fun (r, ps) arg =>
+    match tryConcrete arg with
+    | some "-r" | some "-rf" | some "-fr" => (true, ps)
+    | some "-f" => (r, ps)
+    | _ => (r, arg :: ps)) (false, [])
+  let paths := paths.reverse
+  let s' := paths.foldl (fun os arg =>
+    match tryConcrete arg with
+    | some path => (OS.osRmFile os path recursive).1
+    | none => os) s
+  .inr (exitWith 0 s', .done, false)
 
 /-- Read all content from stdin and write to stdout, line by line,
     used by builtinCat when called without file arguments. -/

@@ -386,8 +386,7 @@ def prepareSubshell (os : OsState α) : OsState α :=
     { os1.sh with
       outermost := false,
       jobs := [],
-      loopNest := 0,
-      locals := [] } }
+      loopNest := 0 } }
 
 /-! # OS Typeclass -/
 
@@ -444,6 +443,10 @@ class OS (α : Type) where
   osIsWriteable : OsState α → Path → Bool
   osIsExecutable : OsState α → Path → Bool
   osReadFile : OsState α → Path → Option String := fun _ _ => none
+
+  -- directory/file management (non-standard, for symbolic test mode)
+  osMkdir : OsState α → Path → Bool → OsState α × Bool := fun os _ _ => (os, true)
+  osRmFile : OsState α → Path → Bool → OsState α × Bool := fun os _ _ => (os, true)
 
   -- fd operations
   osWriteFd : OsState α → Fd → String → Option (OsState α)

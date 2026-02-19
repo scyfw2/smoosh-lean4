@@ -654,8 +654,10 @@ partial def parseTrapSimpleCmd (s : String) : Stmt :=
     parseTrapCommandWords trimmed
 
 partial def parseTrapString (s : String) : Stmt :=
+  -- Treat newlines as command separators, like semicolons
+  let normalized := String.intercalate ";" (s.splitOn "\n")
   -- Split by ';' respecting nesting of (), {}, and quotes
-  let semiParts := splitTopLevel s ";"
+  let semiParts := splitTopLevel normalized ";"
   let stmts := semiParts.filterMap fun part =>
     let trimmed := part.trimAscii.toString
     if trimmed.isEmpty then none
@@ -1223,9 +1225,25 @@ partial def stepEval (s : OsState α) (c : Stmt) (checked : CheckingMode := .unc
       -- For parseString sources (trap/eval), the entire string is parsed at once,
       -- so when done, just finish (don't loop back to re-parse the same string)
       (.xsEval linno src "eval-done", s, .done)
-    | .break_ n => (.xsEval linno src "eval-break", s, .break_ n)
-    | .continue_ n => (.xsEval linno src "eval-continue", s, .continue_ n)
-    | .return_ => (.xsEval linno src "eval-return", s, .return_)
+    | .break_ n =>
+      -- For dot scripts, break/continue should NOT propagate out
+      -- Return .done to exit the dot script (not .evalLoop which would re-parse)
+      match src with
+      | .parseString .parseDot _ =>
+        (.xsEval linno src "eval-break-in-dot", s, .done)
+      | _ => (.xsEval linno src "eval-break", s, .break_ n)
+    | .continue_ n =>
+      -- For dot scripts, continue should NOT propagate out
+      match src with
+      | .parseString .parseDot _ =>
+        (.xsEval linno src "eval-continue-in-dot", s, .done)
+      | _ => (.xsEval linno src "eval-continue", s, .continue_ n)
+    | .return_ =>
+      -- For dot scripts, return should convert to done (exit the source)
+      match src with
+      | .parseString .parseDot _ =>
+        (.xsEval linno src "return-from-dot", s, .done)
+      | _ => (.xsEval linno src "eval-return", s, .return_)
     | .exit_ => (.xsEval linno src "eval-exit", s, .exit_)
     | _ =>
       let (_step, s', c') := stepEval s cmd .unchecked

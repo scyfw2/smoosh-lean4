@@ -95,26 +95,76 @@ def parseBracketChar (pat : SymbolicString) : Except String (SymbolicString × B
   | .q c :: pat' => .ok (pat', .char_ c)
   | .sym _ :: pat' => parseBracketChar pat' -- Skip symbols
 
-/-- Ref: pattern.lem:parse_bracket_entries — Parse bracket entries (char classes, ranges, literals). -/
+/-- Ref: pattern.lem:range_bc — Only Char and Collating are valid range endpoints. -/
+def rangeBc (bc : BracketChar) : Option RangeChar :=
+  match bc with
+  | .char_ c => some (.rchar c)
+  | .collating cls => some (.rcollating cls)
+  | .equiv _ => none
+  | .class_ _ => none
+
+/-- Ref: pattern.lem:parse_bracket_quoted_entries — Parse quoted entries inside brackets. -/
+partial def parseBracketQuotedEntries (pat : SymbolicString) : Except String (SymbolicString × List BracketEntry) :=
+  match pat with
+  | [] => .error "expected end quote"
+  | .c '"' :: pat' => .ok (pat', [])
+  | .c c :: pat' => do
+    let (pat'', es) ← parseBracketQuotedEntries pat'
+    .ok (pat'', .bc (.char_ c) :: es)
+  | .q c :: pat' => do
+    let (pat'', es) ← parseBracketQuotedEntries pat'
+    .ok (pat'', .bc (.char_ c) :: es)
+  | .sym _ :: pat' => parseBracketQuotedEntries pat'
+
+/-- Ref: pattern.lem:parse_bracket_entries — Parse bracket entries (char classes, ranges, literals).
+    Faithfully translated from OCaml pattern.lem:148-197. -/
 partial def parseBracketEntries (pat : SymbolicString) : Except String (SymbolicString × List BracketEntry) :=
   match pat with
   | [] => .error "expected bracket entries, found end-of-pattern"
   | .c ']' :: pat' => .ok (pat', [])
+  -- OCaml: | #'-'::#']'::pat' -> Right (pat', [BC (Char #'-')])
+  | .c '-' :: .c ']' :: pat' => .ok (pat', [.bc (.char_ '-')])
+  -- OCaml: | #'"'::pat' -> handle quoted entries
+  | .c '"' :: pat' =>
+    match parseBracketQuotedEntries pat' with
+    | .error _ =>
+      -- Treat as a normal quote character
+      match parseBracketEntries pat' with
+      | .error err => .error err
+      | .ok (pat'', es) => .ok (pat'', .bc (.char_ '"') :: es)
+    | .ok (pat'', es) =>
+      match parseBracketEntries pat'' with
+      | .error err => .error err
+      | .ok (pat''', es') => .ok (pat''', es ++ es')
   | _ => do
     let (pat', bc) ← parseBracketChar pat
     match pat' with
-    | .c '-' :: .c ']' :: pat'' => .ok (.c ']' :: pat'', [.bc (.char_ '-'), .bc bc])
-    | .c '-' :: pat'' => do
-      let (pat''', bc2) ← parseBracketChar pat''
-      let (pat'''', es) ← parseBracketEntries pat'''
-      .ok (pat'''', .range bc bc2 :: es)
+    -- OCaml: | Right (#'-'::#']'::pat', bc) -> '-' as final char is literal
+    | .c '-' :: .c ']' :: pat'' => .ok (pat'', [.bc (.char_ '-'), .bc bc])
+    -- OCaml: | Right (#'-'::pat', bc) -> try range
+    | .c '-' :: pat'' =>
+      match parseBracketChar pat'' with
+      | .error _ =>
+        -- OCaml: range endpoint parse failed; treat bc as literal and reparse from '-'
+        match parseBracketEntries (.c '-' :: pat'') with
+        | .error err => .error err
+        | .ok (pat''', es) => .ok (pat''', .bc bc :: es)
+      | .ok (pat''', bc') =>
+        -- OCaml: validate range endpoints with range_bc
+        match rangeBc bc, rangeBc bc' with
+        | some _rlo, some _rhi =>
+          let (pat'''', es) ← parseBracketEntries pat'''
+          .ok (pat'''', .range bc bc' :: es)
+        | none, _ => .error s!"invalid range character: {stringOfBracketChar bc}"
+        | _, none => .error s!"invalid range character: {stringOfBracketChar bc'}"
     | _ => do
       let (pat'', es) ← parseBracketEntries pat'
       .ok (pat'', .bc bc :: es)
 
 def bracketInitialLiteral (c : Char) : Bool := c == ']' || c == '-'
 
-/-- Ref: pattern.lem:parse_bracket — Parse a full bracket expression `[...]` or `[!...]`. -/
+/-- Ref: pattern.lem:parse_bracket — Parse a full bracket expression `[...]` or `[!...]`.
+    Faithfully translated from OCaml pattern.lem:217-240. -/
 partial def parseBracket (pat : SymbolicString) : Except String (SymbolicString × PatternChar) :=
   match pat with
   | [] => .error "unterminated bracket, found end-of-pattern"
@@ -122,34 +172,28 @@ partial def parseBracket (pat : SymbolicString) : Except String (SymbolicString 
     let (matching, pat'') :=
       if c == '!' then (false, pat')
       else (true, pat)
-    let (realPat, frontEs) :=
-      (match pat'' with
-      | .c c' :: rest' =>
-        if bracketInitialLiteral c' then (rest', [BracketEntry.bc (.char_ c')])
+    match pat'' with
+    | [] => .error "unterminated bracket, found end-of-pattern"
+    -- OCaml: | #']'::[] -> Left "empty bracket, treating as literal characters"
+    | [.c ']'] => .error "empty bracket, treating as literal characters"
+    | .c c' :: pat''' =>
+      let (realPat, frontEs) :=
+        if bracketInitialLiteral c' then (pat''', [BracketEntry.bc (.char_ c')])
         else (pat'', [])
-      | .q c' :: rest' => (rest', [BracketEntry.bc (.char_ c')]) -- Quoted initial char is mostly just a char, except ] and - might be special if not quoted? Actually if quoted, they are definitely literals.
-      | _ => (pat'', []) : SymbolicString × List BracketEntry)
-    match parseBracketEntries realPat with
-    | .error err => .error err
-    | .ok (restPat, es) => .ok (restPat, .bracket matching (frontEs ++ es))
-  | .q c :: pat' =>
-      -- Quoted [ is just literal [. But parseBracket is called only if [ was detected.
-      -- Wait, parseBracket is called from parsePatternLoop when it sees [.
-      -- If parsePatternLoop calls it, it already consumed [.
-      -- But here parseBracket logic seems to handle the content INSIDE [ ... ].
-      -- Ah, parsePatternLoop consumes '[', calls parseBracket with the rest.
-      -- The first char of parseBracket input is the first char *after* [.
-      -- So my match above on `.c c :: pat'` is handling `!`, `^` etc.
-      let (matching, pat'') := (true, pat) -- Quoted first char can't be ! or ^?
-      -- Actually, `[!...]` negation. If `!` is quoted, does it negate? `["!"]` -> matches `!`?
-      -- The standard says `!` or `^` as first char. Quote removes special meaning.
-      -- So if .q '!', it is NOT negation.
-      let (realPat, frontEs) : SymbolicString × List BracketEntry := (pat, []) -- No special negation, proceed to entries
-      -- But wait, what if the first char IS quoted ] or -?
-      -- `["-"]` -> matches -
       match parseBracketEntries realPat with
-        | .error err => .error err
-        | .ok (restPat, es) => .ok (restPat, .bracket true es)
+      | .error err => .error err
+      | .ok (restPat, es) => .ok (restPat, .bracket matching (frontEs ++ es))
+    | .q c' :: pat''' =>
+      -- Quoted char: treat as literal entry
+      match parseBracketEntries pat''' with
+      | .error err => .error err
+      | .ok (restPat, es) => .ok (restPat, .bracket matching (.bc (.char_ c') :: es))
+    | .sym _ :: pat''' => parseBracket pat'''
+  | .q _ :: _ =>
+    -- Quoted first char after [: not negation, treat as entries
+    match parseBracketEntries pat with
+    | .error err => .error err
+    | .ok (restPat, es) => .ok (restPat, .bracket true es)
   | .sym _ :: pat' => parseBracket pat'
 
 /-- Ref: pattern.lem:parse_pattern_loop — Parse a pattern string into a list of `PatternChar`. -/

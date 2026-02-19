@@ -34,12 +34,15 @@ def symbolicFsResolveComps (fs : SymbolicFs) : List String → Option (FileUnit)
     | some fs' => symbolicFsResolveComps fs' comps'
     | none => none
 
+def normalizeFsComponents (comps : List String) : List String :=
+  comps.filter fun c => c != "" && c != "."
+
 def symbolicFsResolvePath (fs : SymbolicFs) (path : String) : Option (FileUnit) :=
-  let comps := splitStringOn false '/' path
+  let comps := normalizeFsComponents (splitStringOn false '/' path)
   symbolicFsResolveComps fs comps
 
 def symbolicFsResolveNode (fs : SymbolicFs) (path : String) : Option SymbolicFs :=
-  let comps := splitStringOn false '/' path
+  let comps := normalizeFsComponents (splitStringOn false '/' path)
   let rec traverse (fs : SymbolicFs) (comps : List String) : Option SymbolicFs :=
     match comps with
     | [] => some fs
@@ -82,6 +85,73 @@ def symbolicFsWrite (fs : SymbolicFs) (path : String) (content : String) (append
           | none => none
         | none => none
   update fs comps
+
+/-- Create a directory at the given path in the symbolic filesystem.
+    If mkdirP is true, creates intermediate directories (like mkdir -p). -/
+def symbolicFsMkdir (fs : SymbolicFs) (path : String) (mkdirP : Bool) : Option SymbolicFs :=
+  let comps := (splitStringOn false '/' path).filter (· != "")
+  let rec create (fs : SymbolicFs) (comps : List String) : Option SymbolicFs :=
+    match comps with
+    | [] => some fs
+    | [name] =>
+      match fs with
+      | .fsFile _ _ _ => none
+      | .fsDir entries =>
+        match entries.find? (fun (n, _) => n == name) with
+        | some (_, .fsDir _) => some fs  -- already exists
+        | some _ => none  -- file exists with same name
+        | none =>
+          some (.fsDir ((name, .fsDir []) :: entries))
+    | dir :: rest =>
+      match fs with
+      | .fsFile _ _ _ => none
+      | .fsDir entries =>
+        match entries.find? (fun (n, _) => n == dir) with
+        | some (_, subfs) =>
+          match create subfs rest with
+          | some subfs' =>
+            let entries' := entries.filter (fun (n, _) => n != dir)
+            some (.fsDir ((dir, subfs') :: entries'))
+          | none => none
+        | none =>
+          if mkdirP then
+            -- Create intermediate directory
+            match create (.fsDir []) rest with
+            | some subfs' => some (.fsDir ((dir, subfs') :: entries))
+            | none => none
+          else none
+  create fs comps
+
+/-- Remove a file or directory from the symbolic filesystem.
+    If recursive is true, removes directories and their contents. -/
+def symbolicFsRemove (fs : SymbolicFs) (path : String) (recursive : Bool) : Option SymbolicFs :=
+  let comps := (splitStringOn false '/' path).filter (· != "")
+  let rec remove (fs : SymbolicFs) (comps : List String) : Option SymbolicFs :=
+    match comps with
+    | [] => none
+    | [name] =>
+      match fs with
+      | .fsFile _ _ _ => none
+      | .fsDir entries =>
+        match entries.find? (fun (n, _) => n == name) with
+        | some (_, .fsDir _) =>
+          if recursive then some (.fsDir (entries.filter (fun (n, _) => n != name)))
+          else none  -- can't remove directory without -r
+        | some _ => some (.fsDir (entries.filter (fun (n, _) => n != name)))
+        | none => some fs  -- already gone
+    | dir :: rest =>
+      match fs with
+      | .fsFile _ _ _ => none
+      | .fsDir entries =>
+        match entries.find? (fun (n, _) => n == dir) with
+        | some (_, subfs) =>
+          match remove subfs rest with
+          | some subfs' =>
+            let entries' := entries.filter (fun (n, _) => n != dir)
+            some (.fsDir ((dir, subfs') :: entries'))
+          | none => none
+        | none => some fs  -- parent doesn't exist
+  remove fs comps
 
 /-! # Symbolic fd targets -/
 
@@ -220,6 +290,9 @@ def countOpenFifo (sym : Symbolic) (fifoNum : FifoNum) : Nat :=
 def stepWorld (stepFun : StepFun Symbolic) (os : OsState Symbolic) : OsState Symbolic × Bool :=
   let rec loop (pid : Nat) (os : OsState Symbolic) (progress : Bool) : OsState Symbolic × Bool :=
     if pid >= os.symbolic.procs.length then (os, progress)
+    else if pid == os.symbolic.curpid then
+      -- Skip the current process (it's being stepped by the caller)
+      loop (pid + 1) os progress
     else
       match listGet? os.symbolic.procs pid with
       | some (.shell .procRunning stmt sh fds stepped pending) =>
@@ -237,11 +310,25 @@ def stepWorld (stepFun : StepFun Symbolic) (os : OsState Symbolic) : OsState Sym
                          procs := procs' }
            let os' := { os with symbolic := sym' }
            (os', true)
-        | .inr (some ec) =>
-           let newProc := Proc.zombie ec
-           let procs' := match adjustNth os.symbolic.procs pid (fun _ => (newProc, ())) with | some (p, _) => p | none => os.symbolic.procs
-           let sym' := { os.symbolic with fifos := childOs'.symbolic.fifos, fsRoot := childOs'.symbolic.fsRoot, procs := procs' }
-           ({ os with symbolic := sym' }, true)
+        | .inr (some _ec) =>
+           -- OCaml: symbolic_step_pid:490-505 — check EXIT trap before zombifying
+           let (childOs2, trapOpt) := exitTrap childOs'
+           match trapOpt with
+           | some handler =>
+             -- EXIT trap exists: keep process running with handler, then exit
+             let sHandler := stringOfSymbolicString handler
+             let handlerCmd := Stmt.evalLoop 1 (none, none) (.parseString .parseTrap sHandler) .noninteractive .subsidiary
+             let exitStmt := Stmt.semi handlerCmd .exit_
+             let newProc := Proc.shell .procRunning exitStmt childOs2.sh childOs2.symbolic.shFds (.stepped true) pending
+             let procs' := match adjustNth os.symbolic.procs pid (fun _ => (newProc, ())) with | some (p, _) => p | none => os.symbolic.procs
+             let sym' := { os.symbolic with fifos := childOs2.symbolic.fifos, fsRoot := childOs2.symbolic.fsRoot, procs := procs' }
+             ({ os with symbolic := sym' }, true)
+           | none =>
+             -- No EXIT trap: zombie the process
+             let newProc := Proc.zombie childOs2.sh.exitCode
+             let procs' := match adjustNth os.symbolic.procs pid (fun _ => (newProc, ())) with | some (p, _) => p | none => os.symbolic.procs
+             let sym' := { os.symbolic with fifos := childOs2.symbolic.fifos, fsRoot := childOs2.symbolic.fsRoot, procs := procs' }
+             ({ os with symbolic := sym' }, true)
          | .inr none =>
            loop (pid + 1) os progress
       | _ => loop (pid + 1) os progress
@@ -483,15 +570,33 @@ instance : OS Symbolic where
 
   osHandleSignal os _sig _handler := os
   osSignalPid os sig pid _asPg :=
-    -- OCaml: find proc by pid, append sig to pending
-    -- Note: OCaml uses mutable queue/list. We append to end? Or push to front?
-    -- OCaml `post_signal`: `p.pending <- p.pending @ [s]`
-    match listGet? os.symbolic.procs pid with
-    | some (.shell status stmt sh fds stepped pending) =>
-      let newProc := Proc.shell status stmt sh fds stepped (pending ++ [sig])
-      let procs' := os.symbolic.procs.set pid newProc
-      ({ os with symbolic := { os.symbolic with procs := procs' } }, true)
-    | _ => (os, false)
+    -- OCaml: proc_receive_signal (os_symbolic.lem:430-464)
+    -- Save state first, then check trap/default behavior
+    let os1 := procSaveState os
+    match listGet? os1.symbolic.procs pid with
+    | some (.shell status stmt procSh fds stepped pending) =>
+      -- Check if process has a trap handler for this signal
+      let (os2, proc') :=
+        match procSh.traps.find? (fun (s, _) => s == sig) with
+        | some _ =>
+          -- Trap exists: add signal to pending for check_traps to handle
+          (os1, Proc.shell status stmt procSh fds stepped (pending ++ [sig]))
+        | none =>
+          -- No trap: apply default signal behavior
+          match sig.defaultBehavior with
+          | .terminate _actions =>
+            let ec := 128 + sig.platformInt
+            (os1, Proc.zombie ec)
+          | .ignore =>
+            (os1, Proc.shell status stmt procSh fds stepped pending)
+          | .stop =>
+            (os1, Proc.shell .procStopped stmt procSh fds stepped pending)
+          | .continue_ =>
+            (os1, Proc.shell .procRunning stmt procSh fds stepped pending)
+      let procs' := os2.symbolic.procs.set pid proc'
+      ({ os2 with symbolic := { os2.symbolic with procs := procs' } }, true)
+    | some (.zombie _) => (os1, false)
+    | _ => (os1, false)
 
   osPendingSignal os :=
     -- OCaml: check current process pending list, pop head
@@ -514,15 +619,14 @@ instance : OS Symbolic where
   osPhysicalCwd os := os.sh.cwd
 
   osChdir os path :=
-    -- OCaml: symbolic_chdir checks if path resolves to a directory
-    match symbolicFsResolvePath os.symbolic.fsRoot path with
-    | some (.dir _) | some .file =>
-      -- Accept any existing path (OCaml is lenient in symbolic mode)
-      ({ os with sh := { os.sh with cwd := path } }, none)
-    | none =>
-      -- Path doesn't exist, but symbolic mode is lenient — just update cwd
-      -- OCaml actually succeeds here too for symbolic mode
-      ({ os with sh := { os.sh with cwd := path } }, none)
+    -- Resolve path: ensure it's normalized
+    let resolvedPath := if path == "/" then "/" else
+      -- Strip trailing slash
+      let p := if path.endsWith "/" && path.length > 1
+        then path.dropRight 1 else path
+      p
+    -- Check if directory exists in symbolic FS (lenient in symbolic mode — always succeed)
+    ({ os with sh := { os.sh with cwd := resolvedPath } }, none)
 
   osReaddir os path :=
     match symbolicFsResolveNode os.symbolic.fsRoot path with
@@ -583,6 +687,16 @@ instance : OS Symbolic where
     match symbolicFsResolveNode os.symbolic.fsRoot path with
     | some (.fsFile content _ _) => some content
     | _ => none
+
+  osMkdir os path mkdirP :=
+    match symbolicFsMkdir os.symbolic.fsRoot path mkdirP with
+    | some newFs => ({ os with symbolic := { os.symbolic with fsRoot := newFs } }, true)
+    | none => (os, false)
+
+  osRmFile os path recursive :=
+    match symbolicFsRemove os.symbolic.fsRoot path recursive with
+    | some newFs => ({ os with symbolic := { os.symbolic with fsRoot := newFs } }, true)
+    | none => (os, false)
 
   osWriteFd os fd s := symbolicWriteFd os fd s
 
@@ -649,18 +763,64 @@ instance : OS Symbolic where
           shFds := os.symbolic.shFds ++ [(fd, .path sfile)] }
         ( { os with symbolic := sym' }, .inr fd )
       else
-        match symbolicFsResolvePath os.symbolic.fsRoot sfile with
-        | some _ =>
+        match symbolicFsResolveNode os.symbolic.fsRoot sfile with
+        | some (.fsFile content _ _) =>
+          -- Create a FIFO with the file content so osReadLineFd/osReadAllFd can read from it
+          let fifoIdx := os.symbolic.fifos.length
           let fd := symbolicFreshFd os.symbolic.shFds
           let sym' := { os.symbolic with
-            shFds := os.symbolic.shFds ++ [(fd, .path sfile)] }
+            shFds := os.symbolic.shFds ++ [(fd, .fifo fifoIdx)],
+            fifos := os.symbolic.fifos ++ [content] }
           ( { os with symbolic := sym' }, .inr fd )
+        | some (.fsDir _) =>
+          ( os, .inl (sfile ++ ": Is a directory") )
         | none =>
           ( os, .inl (sfile ++ ": No such file or directory") )
-    | _ =>
+    | .to =>
+      -- Check noclobber: if set, refuse to overwrite existing regular files
+      let noclobber := os.sh.opts.contains .noclobber
+      if noclobber && !isDeviceFile then
+        match symbolicFsResolveNode os.symbolic.fsRoot sfile with
+        | some (.fsFile _ _ _) =>
+          -- File exists and is regular: noclobber prevents overwriting
+          ( os, .inl (sfile ++ ": cannot overwrite existing file") )
+        | _ =>
+          -- File doesn't exist or is not regular: create empty file, proceed normally
+          let fd := symbolicFreshFd os.symbolic.shFds
+          let newFs := match symbolicFsWrite os.symbolic.fsRoot sfile "" false with
+            | some fs => fs | none => os.symbolic.fsRoot
+          let sym' := { os.symbolic with
+            shFds := os.symbolic.shFds ++ [(fd, .path sfile)],
+            fsRoot := newFs }
+          ( { os with symbolic := sym' }, .inr fd )
+      else
+        -- Truncate/create file (> without noclobber)
+        let fd := symbolicFreshFd os.symbolic.shFds
+        let newFs := match symbolicFsWrite os.symbolic.fsRoot sfile "" false with
+          | some fs => fs | none => os.symbolic.fsRoot
+        let sym' := { os.symbolic with
+          shFds := os.symbolic.shFds ++ [(fd, .path sfile)],
+          fsRoot := newFs }
+        ( { os with symbolic := sym' }, .inr fd )
+    | .append =>
+      -- For append: create file if not exists, but don't truncate existing
       let fd := symbolicFreshFd os.symbolic.shFds
+      let newFs := match symbolicFsResolveNode os.symbolic.fsRoot sfile with
+        | some _ => os.symbolic.fsRoot  -- File exists, don't touch it
+        | none => match symbolicFsWrite os.symbolic.fsRoot sfile "" false with
+          | some fs => fs | none => os.symbolic.fsRoot
       let sym' := { os.symbolic with
-        shFds := os.symbolic.shFds ++ [(fd, .path sfile)] }
+        shFds := os.symbolic.shFds ++ [(fd, .path sfile)],
+        fsRoot := newFs }
+      ( { os with symbolic := sym' }, .inr fd )
+    | _ =>
+      -- Other output redirect types (.clobber, .fromto): truncate/create
+      let fd := symbolicFreshFd os.symbolic.shFds
+      let newFs := match symbolicFsWrite os.symbolic.fsRoot sfile "" false with
+        | some fs => fs | none => os.symbolic.fsRoot
+      let sym' := { os.symbolic with
+        shFds := os.symbolic.shFds ++ [(fd, .path sfile)],
+        fsRoot := newFs }
       ( { os with symbolic := sym' }, .inr fd )
   osOpenHeredoc os s :=
     let fifoIdx := os.symbolic.fifos.length

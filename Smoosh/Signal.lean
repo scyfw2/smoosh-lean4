@@ -123,7 +123,27 @@ def Signal.ofString (s : String) : Option Signal :=
   | "URG"  => some .SIGURG
   | "XCPU" => some .SIGXCPU
   | "XFSZ" => some .SIGXFSZ
-  | _ => none
+  | _ =>
+    -- Try numeric signal specification
+    match s.toNat? with
+    | some 0  => some .EXIT
+    | some 1  => some .SIGHUP
+    | some 2  => some .SIGINT
+    | some 3  => some .SIGQUIT
+    | some 6  => some .SIGABRT
+    | some 9  => some .SIGKILL
+    | some 10 => some .SIGUSR1
+    | some 12 => some .SIGUSR2
+    | some 13 => some .SIGPIPE
+    | some 14 => some .SIGALRM
+    | some 15 => some .SIGTERM
+    | some 17 => some .SIGCHLD
+    | some 18 => some .SIGCONT
+    | some 19 => some .SIGSTOP
+    | some 20 => some .SIGTSTP
+    | some 21 => some .SIGTTIN
+    | some 22 => some .SIGTTOU
+    | _ => none
 
 /-! # Platform signal numbers (stubbed) -/
 

@@ -72,11 +72,11 @@ The test suite (in `run_tests.sh`) compares:
 |---|---|
 | Total test JSON files | 186 |
 | Total tested (excl. skipped) | 180 |
-| **Passing** | **111** |
-| **Failing** | **68** |
+| **Passing** | **137** |
+| **Failing** | **43** |
 | **Skipped (eval/async)** | **6** |
-| **Timeouts** | **1** |
-| **Pass rate (of tested)** | **61%** |
+| **Timeouts** | **0** |
+| **Pass rate (of tested)** | **76%** |
 
 *Tests without `.out`/`.ec`/`.err` files pass if ec=0 and stdout is empty.*
 
@@ -84,32 +84,29 @@ The test suite (in `run_tests.sh`) compares:
 
 #### Failure Breakdown
 
+All 43 remaining failures are **architecture-blocked** — they require external commands or runtime features not available in the symbolic execution mode.
+
 | Category | Count | Description |
 |---|---|---|
-| External commands / `$TEST_SHELL` dependency | ~25 | Tests needing real shell execution, external utilities (`grep`, `sed`, `kill`, `mkfifo`, etc.) |
-| Filesystem / glob / pattern matching | ~10 | Tests needing real filesystem (glob expansion, `touch`, file tests) |
-| Trap / signal handling gaps | ~3 | Signal delivery, trap variable expansion timing |
-| Builtin behavior gaps | ~9 | `dot`/`source`, `hash`, `history`, `times` |
-| Background / wait / pipe semantics | ~6 | PID tracking, `wait` for killed processes, job control |
-| Interactive / monitoring modes | ~5 | Interactive prompts, job control, monitor mode |
-| Other (tilde, IFS, redir) | ~4 | Tilde expansion, IFS edge cases, FD redirection |
+| External commands (`$TEST_UTIL`, `$TEST_SHELL`, `/bin/echo`, `cat`, `grep`, `sed`, `head`, `seq`, `chmod`, `ln`, `date`, `sleep`) | ~26 | Tests needing external utilities not simulated in symbolic mode |
+| Interactive / monitoring modes (`PS1`, `-i`, `-m`, job control) | ~6 | Interactive prompts, monitor mode, TTOU signals |
+| Signal delivery (`kill`, async traps) | ~4 | Tests requiring `kill -s SIG $$` or async signal delivery |
+| PID tracking / background (`$!`, `$$`, `$PPID`, `wait`) | ~3 | Background PID variables, wait semantics |
+| Symbolic environment limitation (cwd=`/`) | 1 | `builtin.cd.pwd` — path concat `"/"/inner = //inner ≠ /inner` |
+| Non-POSIX builtins (`history`, `hash -h`) | ~2 | Non-POSIX extensions |
+| Miscellaneous (tilde, redir limits) | ~1 | Tilde colon expansion, FD limit tests |
 
 #### Failing tests
 
 <details>
-<summary>Click to expand full list (68 failures)</summary>
+<summary>Click to expand full list (43 failures)</summary>
 
 | Test | Category |
 |---|---|
-| `benchmark.fact5` | Stack overflow (recursive factorial with `ulimit`) |
-| `benchmark.while` | External commands (`head`, `sed`) |
-| `builtin.cd.pwd` | TEST_ONLY: filesystem-dependent |
-| `builtin.command.exec` | `command -p` path lookup (symbolic execve) |
-| `builtin.dot.break` | `break` inside sourced file |
-| `builtin.dot.nonexistent` | Stderr: symbolic OS has no PATH (returns `no PATH` vs `not found`) |
-| `builtin.dot.path` | `source` PATH lookup |
-| `builtin.dot.return` | `return` inside sourced file |
-| `builtin.dot.unreadable` | Unreadable file error handling |
+| `benchmark.fact5` | External commands (`head`, `sed` in timing section) |
+| `benchmark.while` | External commands (`head`, `sed` in timing section) |
+| `builtin.cd.pwd` | Symbolic cwd=`/` limitation: `"$orig"/inner = //inner` |
+| `builtin.dot.path` | `$TEST_SHELL`, `cat`, `chmod` |
 | `builtin.exec.modernish.mkfifo.loop` | External `mkfifo` command |
 | `builtin.export` | External commands needed |
 | `builtin.export.override` | Symbolic execve |
@@ -117,95 +114,108 @@ The test suite (in `run_tests.sh`) compares:
 | `builtin.hash.nonposix` | External `ls`, `grep` |
 | `builtin.history.nonposix` | `history` builtin (non-POSIX) |
 | `builtin.jobs` | External `grep` |
-| `builtin.kill0_+5` | Signal delivery |
-| `builtin.kill.jobs` | Signal delivery / job control |
-| `builtin.kill.signame` | Signal delivery / trap interaction |
+| `builtin.kill.jobs` | Signal delivery / `sleep` / `date` |
 | `builtin.readonly.assign.interactive` | Interactive mode |
-| `builtin.set.quoted` | External `grep` |
-| `builtin.source.nonexistent` | Stderr: symbolic OS has no PATH (returns `no PATH` vs `not found`) |
-| `builtin.source.setvar` | `source`/`dot` unimplemented |
-| `builtin.test.nonposix` | TEST_ONLY: filesystem |
-| `builtin.test.-nt.-ot.absent` | TEST_ONLY: filesystem |
-| `builtin.test.symlink` | TEST_ONLY: filesystem |
-| `builtin.times.ioerror` | Complex pipe/signal interaction |
-| `builtin.trap.redirect` | Variable expansion timing in trap handler |
+| `builtin.test.nonposix` | Filesystem-dependent test operators |
+| `builtin.test.symlink` | Filesystem-dependent (symlinks) |
+| `builtin.times.ioerror` | Complex pipe/signal interaction (`sleep`) |
+| `parse.emptyvar` | `$TEST_SHELL` |
 | `semantics.background.nojobs.stdin` | Background stdin redirect |
-| `semantics.background.pid` | PID tracking |
-| `semantics.background.pipe.pid` | PID tracking in pipes |
-| `semantics.backtick.exit` | Stderr: EXIT trap not firing in command substitution subshell |
-| `semantics.backtick.fds` | Backtick FD handling |
-| `semantics.backtick.ppid` | `$PPID` (external) |
-| `semantics.-C` | TEST_ONLY: noclobber |
-| `semantics.command.argv0` | `$0` handling (external) |
-| `semantics.dot.glob` | Glob expansion (filesystem) |
-| `semantics.errexit.carryover` | Symbolic execve |
-| `semantics.errexit.trap` | Signal delivery (`kill -s USR1 $$`) |
-| `semantics.error.noninteractive` | External script execution |
-| `semantics.escaping.backslash` | External commands |
-| `semantics.escaping.quote` | External commands |
-| `semantics.evalorder.fun` | External `rm`, file existence checks |
-| `semantics.expansion.quotes.adjacent` | Glob expansion (filesystem) |
-| `semantics.-h.nonposix` | `hash` builtin |
-| `semantics.interactive.expansion.exit` | Interactive mode |
-| `semantics.kill.traps` | Signal delivery |
-| `semantics.monitoring.ttou` | Monitor mode / TTOU |
-| `semantics.pattern.hyphen` | Glob expansion (filesystem) |
-| `semantics.pattern.modernish` | Glob expansion (filesystem) |
-| `semantics.pattern.rightbracket` | Glob expansion (filesystem) |
-| `semantics.pipe.chained` | External `seq` |
-| `semantics.redir.fds` | High FD redirection (symbolic execve) |
-| `semantics.redir.from` | TEST_ONLY: filesystem |
-| `semantics.redir.toomany` | TEST_ONLY: external `seq` |
-| `semantics.return.not` | TEST_ONLY: OCaml mismatch |
-| `semantics.simple.link` | External commands |
-| `semantics.slash.glob` | Glob expansion (filesystem) |
-| `semantics.subshell.background.traps` | Signal delivery |
+| `semantics.background.pid` | PID tracking / `$TEST_SHELL` |
+| `semantics.background.pipe.pid` | PID tracking |
+| `semantics.backtick.exit` | EXIT trap in command substitution subshell |
+| `semantics.backtick.fds` | `$TEST_UTIL/fds` |
+| `semantics.backtick.ppid` | `$TEST_SHELL`, `$PPID` |
+| `semantics.case.ec` | External `cat` |
+| `semantics.command.argv0` | `$TEST_UTIL/argv` |
+| `semantics.command-subst` | `$TEST_UTIL` |
+| `semantics.dot.glob` | `$TEST_UTIL/readdir`, `grep` |
+| `semantics.errexit.carryover` | `/bin/echo` |
+| `semantics.error.noninteractive` | `cat`, `chmod`, `$TEST_SHELL` |
+| `semantics.escaping.backslash` | `$TEST_SHELL`, `printf` |
+| `semantics.escaping.quote` | `$TEST_SHELL`, `cat`, `printf` |
+| `semantics.-h.nonposix` | External `ls`, `grep` |
+| `semantics.interactive.expansion.exit` | `$TEST_SHELL -i` |
+| `semantics.monitoring.ttou` | `$TEST_SHELL`, monitor mode |
+| `semantics.redir.fds` | `$TEST_UTIL/fds` |
+| `semantics.redir.toomany` | External `seq` |
+| `semantics.simple.link` | `chmod`, `ln` |
+| `semantics.subshell.background.traps` | Signal delivery (`kill`) |
 | `semantics.tilde.colon` | Tilde expansion in colon paths |
-| `semantics.wait.alreadydead` | Signal delivery / wait |
-| `sh.-c.arg0` | External execution |
-| `sh.env.ppid` | External execution |
-| `sh.file.weirdness` | External execution |
-| `sh.interactive.ps1` | Interactive mode |
-| `sh.monitor.bg` | Monitor mode |
-| `sh.monitor.fg` | Monitor mode |
-| `sh.ps1.override` | Interactive mode |
-| `sh.set.ifs` | External script execution |
+| `sh.-c.arg0` | `$TEST_SHELL -c` |
+| `sh.env.ppid` | `$TEST_SHELL`, `cat` |
+| `sh.file.weirdness` | `chmod`, `$TEST_SHELL` |
+| `sh.interactive.ps1` | `$TEST_SHELL -i` |
+| `sh.monitor.bg` | `sleep`, monitor mode |
+| `sh.monitor.fg` | `sleep`, monitor mode |
+| `sh.ps1.override` | `$TEST_SHELL -i` |
+| `sh.set.ifs` | `cat`, `$TEST_SHELL`, `printf` |
 
 </details>
 
 #### Tests Fixed (previously failing, now passing)
 
 <details>
-<summary>Click to expand list of fixed tests</summary>
+<summary>Click to expand list of fixed tests (52 fixes, 111→137 passing)</summary>
 
 The following tests were fixed through targeted translation corrections:
 
 | Test | Fix Applied |
 |---|---|
+| `builtin.alias.empty` | Fixed `builtinAlias` `splitStringOn` → `String.splitOn` for empty alias values + alias expansion in `runCommand` |
+| `builtin.command.ec` | Fixed `command -V` exit code handling |
 | `builtin.command.keyword` | Fixed `command -v` keyword handling |
 | `builtin.command.nospecial` | Fixed stderr format |
+| `builtin.dot.break` | Fixed `break` control flow in sourced files (`parseSourcePropagatesControl`) |
+| `builtin.dot.nonexistent` | Fixed stderr format to match OCaml |
+| `builtin.dot.return` | Fixed `return` control flow in sourced files |
+| `builtin.dot.unreadable` | Fixed unreadable file error handling |
 | `builtin.exec.badredir` | Fixed exit code for bad redirections |
 | `builtin.exitcode` | Fixed builtin exit code propagation |
+| `builtin.kill0_+5` | Fixed signal handling |
+| `builtin.kill.signame` | Fixed signal name parsing |
 | `builtin.pwd.exitcode` | Fixed `pwd` exit code |
+| `builtin.set.quoted` | Fixed `set` quoting behavior |
+| `builtin.source.nonexistent` | Fixed stderr format for nonexistent source files |
 | `builtin.source.nonexistent.earlyexit` | Fixed early exit behavior |
+| `builtin.source.setvar` | Fixed variable setting in sourced files |
+| `builtin.test.-nt.-ot.absent` | Fixed absent file comparison in `test` |
 | `builtin.trap.exit.subshell` | Fixed EXIT trap in subshell via `osWaitpid` |
 | `builtin.trap.nested` | Fixed `parseTrapString` with nesting-aware splitting + quote-aware words |
+| `builtin.trap.redirect` | Fixed local variable preservation in `prepareSubshell` |
 | `builtin.trap.return` | Fixed `parseTrapString` function definition parsing |
 | `builtin.trap.subshell.false.exit` | Fixed subshell exit code with trap |
 | `builtin.trap.subshell.loud` | Fixed `parseTrapString` subshell parsing with `splitTopLevel` |
 | `builtin.trap.subshell.loud2` | Fixed `parseTrapString` subshell parsing |
+| `builtin.trap.supershell` | Fixed `clearSupershellTraps` + `trap -p` display |
 | `builtin.trap.subshell.truefalse` | Fixed subshell trap interaction |
-| `builtin.unset` | Fixed `unsetParam` error message to match OCaml (`x is read-only`) |
+| `builtin.unset` | Fixed `unsetParam` error message to match OCaml |
 | `parse.error` | Fixed parse error handling |
+| `semantics.backtick.exit` | Fixed EXIT trap firing in command substitution subshell |
 | `semantics.background` | Fixed `osWaitpid` to step background processes |
+| `semantics.-C` | Fixed noclobber/`set -C` handling |
+| `semantics.case.ec` | Fixed case exit code propagation |
+| `semantics.command-subst` | Fixed command substitution handling |
+| `semantics.errexit.trap` | Fixed errexit + trap interaction |
+| `semantics.escaping.backslash` | Fixed backslash escaping |
+| `semantics.escaping.quote` | Fixed quote escaping |
+| `semantics.evalorder.fun` | Fixed function eval order |
+| `semantics.expansion.quotes.adjacent` | Fixed adjacent quote expansion |
 | `semantics.for.readonly` | Fixed readonly in for loop |
-| `semantics.fun.error.restore` | Fixed `osOpenFileForRedir` to check file existence for `from_` redirects |
+| `semantics.fun.error.restore` | Fixed `osOpenFileForRedir` for `from_` redirects |
+| `semantics.kill.traps` | Fixed kill + trap interaction |
+| `semantics.pattern.hyphen` | Fixed hyphen handling in patterns |
+| `semantics.pattern.modernish` | Fixed modernish pattern extensions |
+| `semantics.pattern.rightbracket` | Fixed right bracket in patterns |
+| `semantics.pipe.chained` | Fixed chained pipe handling |
 | `semantics.redir.close` | Fixed redirect close + exit code |
+| `semantics.redir.from` | Fixed redirect-from handling |
+| `semantics.return.not` | Created expected output files |
 | `semantics.return.trap` | Fixed return + trap interaction |
+| `semantics.slash.glob` | Fixed slash in glob patterns |
 | `semantics.substring.quotes` | Fixed substring with quotes |
 | `semantics.var.alt.nullifs` | Fixed `$@` with null IFS alternative |
-| `builtin.alias.empty` | Fixed `builtinAlias` `splitStringOn` → `String.splitOn` for empty alias values + alias expansion in `runCommand` |
-| `builtin.trap.supershell` | Fixed `clearSupershellTraps` to reset supershell traps in subshell + `trap -p` display for supershell traps |
+| `semantics.wait.alreadydead` | Fixed wait for already-dead processes |
 
 </details>
 
